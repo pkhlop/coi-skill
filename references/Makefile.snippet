@@ -1,0 +1,250 @@
+# ── Sandboxed Claude Code (COI) ─────────────────
+# Drop-in Makefile section for any project with `.coi.toml` at the repo root.
+# Assumes the user's SSH agent is at $COI_SSH_SOCK on the host — see
+# skill §1.3 for the one-time shell-rc setup.
+#
+# Bind mounts (including ~/.claude/projects and ~/.claude/skills) are
+# declared in .coi.toml under [[mounts.default]], NOT here.
+#
+# ISOLATION INVARIANT
+# -------------------
+# Multiple projects share the host's Incus daemon. A bare `grep '^coi-'`
+# matches every project's containers — running `make coi-clean` with that
+# would delete someone else's in-flight work. Every recipe below MUST
+# scope to this project's workspace (=$(CURDIR)). We use `coi list --format
+# json` + jq, keyed on the `workspace` field (which COI derives from the
+# directory `coi shell` was launched from).
+#
+# Requires `jq` on the host.
+
+COI_SSH_SOCK     ?= /tmp/ssh-agent-$(USER).sock
+COI_CLAUDE_HOME  := /home/code/.claude
+COI_LOCAL_DOMAIN ?= $(notdir $(CURDIR)).test
+
+# Worktree slug (see SKILL.md §3.10). Empty in the main worktree → hostnames
+# render unprefixed. Non-empty in a sibling worktree → hostnames become
+# <slug>.<COI_LOCAL_DOMAIN> and /etc/hosts lines are tagged with a
+# sentinel so coi-hosts-clean removes only this worktree's entries.
+WORKTREE_SLUG := $(strip $(shell test -f .worktree-slug && cat .worktree-slug 2>/dev/null))
+WORKTREE_HOST_PREFIX := $(if $(WORKTREE_SLUG),$(WORKTREE_SLUG).,)
+COI_HOSTS_SENTINEL := coi-hosts:$(if $(WORKTREE_SLUG),$(WORKTREE_SLUG),main)
+
+# Print the running container name(s) bound to this project's workspace.
+# One name per line; empty output means "no container for this project".
+COI_THIS_JQ := (.active_containers // [])[] | select(.workspace==$$ws and .status=="Running") | .name
+coi-this-container = coi list --format json 2>/dev/null | jq -r --arg ws '$(CURDIR)' '$(COI_THIS_JQ)'
+
+.PHONY: coi coi-resume coi-debug coi-ssh-fix coi-docker-fix coi-git-fix coi-hosts coi-hosts-clean coi-clean coi-containers coi-update coi-extras coi-x11 coi-self-bootstrap _coi-ssh-watcher
+
+coi: ## Launch Claude Code in a sandboxed Incus container
+	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
+	@echo "==> Starting COI sandbox (SSH proxy attaches in background)..."
+	@( $(MAKE) --no-print-directory _coi-ssh-watcher >/dev/null 2>&1 & )
+	@coi shell
+
+coi-resume: ## Resume the most recent Claude Code COI session
+	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
+	@( $(MAKE) --no-print-directory _coi-ssh-watcher >/dev/null 2>&1 & )
+	@coi shell --resume
+
+coi-debug: ## Launch bash in a sandboxed Incus container (no Claude)
+	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
+	@( $(MAKE) --no-print-directory _coi-ssh-watcher >/dev/null 2>&1 & )
+	@coi shell --debug
+
+coi-containers: ## List COI containers bound to this project's workspace
+	@coi list --format json 2>/dev/null | jq -r --arg ws '$(CURDIR)' \
+		'(.active_containers // [])[] | select(.workspace==$$ws) | "  " + .name + " (" + .status + ", " + .ipv4 + ")"' \
+		| { grep . || echo "  (none)"; }
+
+coi-ssh-fix: ## Re-attach SSH agent proxy to running COI container (idempotent)
+	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK)"; exit 1; }
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR))"; exit 1; }; \
+	echo "==> Re-attaching ssh-agent proxy to $$CONTAINER"; \
+	incus config device remove $$CONTAINER ssh-agent 2>/dev/null || true; \
+	incus config device add $$CONTAINER ssh-agent proxy \
+		connect=unix:$(COI_SSH_SOCK) \
+		listen=unix:/tmp/ssh-auth.sock \
+		bind=container \
+		uid=1000 gid=1000 mode=0600; \
+	echo "==> Inside container: export SSH_AUTH_SOCK=/tmp/ssh-auth.sock && ssh-add -l"
+
+coi-git-fix: ## Bind-mount main worktree's .git into the running container so git resolves worktree paths (no-op in main worktree)
+	@if [ -z "$(WORKTREE_SLUG)" ]; then \
+		echo "==> Main worktree — nothing to fix (.git is already inside /workspace)."; \
+		exit 0; \
+	fi
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR))"; exit 1; }; \
+	MAIN_GIT=$$(realpath $$(git rev-parse --git-common-dir)); \
+	test -n "$$MAIN_GIT" || { echo "ERROR: could not resolve main worktree's .git path"; exit 1; }; \
+	echo "==> Mounting $$MAIN_GIT at the same path inside $$CONTAINER (shift=true)"; \
+	incus config device remove $$CONTAINER main-git-dir 2>/dev/null || true; \
+	incus config device add $$CONTAINER main-git-dir disk \
+		source=$$MAIN_GIT path=$$MAIN_GIT shift=true; \
+	echo "==> Done. Inside the container: git status should work from /workspace."
+
+coi-docker-fix: ## Fix /var/run/docker.sock permissions inside running container
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR))"; exit 1; }; \
+	incus exec $$CONTAINER -- chmod 666 /var/run/docker.sock; \
+	echo "==> docker.sock set to 666 in $$CONTAINER"
+
+coi-hosts: ## Point *.$(WORKTREE_HOST_PREFIX)$(COI_LOCAL_DOMAIN) at the running container via /etc/hosts
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR))"; exit 1; }; \
+	IP=$$(incus list $$CONTAINER --format csv -c 4 | grep -oP '10\.\d+\.\d+\.\d+' | head -1); \
+	test -n "$$IP" || { echo "ERROR: could not get container IP"; exit 1; }; \
+	HOSTS="$(WORKTREE_HOST_PREFIX)$(COI_LOCAL_DOMAIN) api.$(WORKTREE_HOST_PREFIX)$(COI_LOCAL_DOMAIN) admin.$(WORKTREE_HOST_PREFIX)$(COI_LOCAL_DOMAIN)"; \
+	echo "==> Updating /etc/hosts: $$HOSTS -> $$IP  (tag: $(COI_HOSTS_SENTINEL))"; \
+	sudo sed -i '/# $(COI_HOSTS_SENTINEL)$$/d' /etc/hosts; \
+	echo "$$IP  $$HOSTS  # $(COI_HOSTS_SENTINEL)" | sudo tee -a /etc/hosts >/dev/null
+
+coi-hosts-clean: ## Remove THIS worktree's lines from /etc/hosts (matched by sentinel tag)
+	@if grep -q '# $(COI_HOSTS_SENTINEL)$$' /etc/hosts 2>/dev/null; then \
+		echo "==> Removing /etc/hosts entries tagged $(COI_HOSTS_SENTINEL)"; \
+		sudo sed -i '/# $(COI_HOSTS_SENTINEL)$$/d' /etc/hosts; \
+	else \
+		echo "==> No /etc/hosts entries tagged $(COI_HOSTS_SENTINEL) — nothing to remove."; \
+	fi
+
+coi-clean: ## Stop & delete THIS project's COI container(s) only (other projects untouched)
+	@CONTAINERS=$$($(coi-this-container)); \
+	if [ -z "$$CONTAINERS" ]; then \
+		echo "==> No running COI container for this project ($(CURDIR)) — nothing to clean."; \
+	else \
+		echo "==> Deleting containers bound to $(CURDIR):"; \
+		echo "$$CONTAINERS" | sed 's/^/    /'; \
+		echo "$$CONTAINERS" | xargs -r -I{} incus delete {} --force; \
+	fi
+	@echo "==> Done. (Global 'coi clean' intentionally NOT invoked — it would sweep other projects' orphans.)"
+
+coi-update: ## Rebuild the COI image to pick up latest Claude Code (5-10 min)
+	@echo "==> Rebuilding coi image — next 'make coi' will use new Claude version"
+	coi build
+
+# ── Generic infrastructure targets ──────────────
+# coi-extras installs project-AGNOSTIC terminal/navigation tools and
+# the IPv4 DNS fix. Language runtimes (PHP, Node, Go, Python, Ruby) and
+# project-scope binaries (Playwright, AWS CLI, DB clients) do NOT go
+# here — add a project-owned target (e.g. coi-project-setup) in the
+# project's own Makefile. See skill §2.3 for version-detection patterns.
+
+coi-extras: ## Install generic terminal tools + IPv4 fix in running COI container
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR)) — start one with 'make coi' first"; exit 1; }; \
+	echo "==> Applying IPv4 preference via /etc/gai.conf (avoids IPv6 happy-eyeballs timeouts)"; \
+	incus exec $$CONTAINER -- bash -c "printf '%s\n' \
+		'# Prefer IPv4 over IPv6 — the Incus bridge has no IPv6 upstream route,' \
+		'# so default IPv6-first resolution causes ~9-36s happy-eyeballs timeouts' \
+		'# per connection (apt, curl, npm, git all affected).' \
+		'precedence  ::1/128       50' \
+		'precedence  ::/0          40' \
+		'precedence  2002::/16     30' \
+		'precedence ::/96          20' \
+		'precedence ::ffff:0:0/96 100' \
+		> /etc/gai.conf"; \
+	echo "==> Installing mc + htop + rsync + pv + bash-completion + make-guile + aria2 + unzip"; \
+	incus exec $$CONTAINER -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
+		DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+			mc htop rsync pv bash-completion make-guile aria2 unzip' >/dev/null; \
+	if incus exec $$CONTAINER -- test -x /usr/local/bin/fzf-make; then \
+		echo "==> fzf-make already installed"; \
+	else \
+		echo "==> Installing rustup + compiling fzf-make (5-10 min, first time only)"; \
+		incus exec $$CONTAINER --env RUSTUP_HOME=/usr/local/rustup --env CARGO_HOME=/usr/local/cargo -- bash -c '\
+			set -e; \
+			if [ ! -x /usr/local/cargo/bin/cargo ]; then \
+				curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path --profile minimal >/dev/null; \
+			fi; \
+			/usr/local/cargo/bin/cargo install --locked --root /usr/local fzf-make >/dev/null'; \
+	fi; \
+	echo "==> Done. For project-specific runtimes (PHP/Node/Go/Python/Ruby/etc.), see skill §2.3."
+
+# ── Inside-container self-bootstrap ─────────────
+# Unlike every other coi-* target above (which run on the HOST and reach
+# into the container via incus exec), this target runs INSIDE the COI
+# container. Invoked by the agent (or user) from /workspace inside a coi
+# shell, it re-applies fixes that don't survive `coi build` or container
+# recreation — e.g. the Playwright crashpad workaround.
+#
+# The actual work lives in the skill's reference script so it can be
+# tested + edited as a normal shell file. The skill dir is bind-mounted
+# at /home/code/.claude/skills/coi inside the container.
+#
+# To extend with another inside-container fix, add a step to the script
+# (skill: references/coi-self-bootstrap.sh). Keep each step idempotent.
+
+# $(or ...) falls back to /home/code when HOME is empty/unset (some non-login
+# shells inside the container don't propagate it). Inside the container that
+# resolves to the bind-mounted skill; on the host it stays $(HOME).
+COI_SELF_BOOTSTRAP_SCRIPT := $(or $(HOME),/home/code)/.claude/skills/coi/references/coi-self-bootstrap.sh
+
+coi-self-bootstrap: ## (RUN INSIDE container) Re-apply per-rebuild fixes (Playwright headless-shell, ...)
+	@if [ ! -x "$(COI_SELF_BOOTSTRAP_SCRIPT)" ]; then \
+		echo "ERROR: $(COI_SELF_BOOTSTRAP_SCRIPT) not found or not executable."; \
+		echo "  On the host, ensure the COI skill is at ~/.claude/skills/coi and the script has +x."; \
+		echo "  Inside the container, the skill dir is bind-mounted via [[mounts.default]] in .coi.toml."; \
+		exit 1; \
+	fi
+	@$(COI_SELF_BOOTSTRAP_SCRIPT)
+
+coi-x11: ## Attach X11 clipboard + PulseAudio microphone to running COI container
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR))"; exit 1; }; \
+	XAUTH_FILE=$${XAUTHORITY:-$$HOME/.Xauthority}; \
+	test -f "$$XAUTH_FILE" || { echo "ERROR: Xauthority file not found at $$XAUTH_FILE (check \$$XAUTHORITY)"; exit 1; }; \
+	echo "==> Attaching X11 display to $$CONTAINER (xauth=$$XAUTH_FILE)"; \
+	incus config device remove $$CONTAINER x11-socket 2>/dev/null || true; \
+	incus config device add $$CONTAINER x11-socket disk source=/tmp/.X11-unix/X0 path=/tmp/.X11-unix/X0; \
+	incus config device remove $$CONTAINER xauth 2>/dev/null || true; \
+	incus file push $$XAUTH_FILE $$CONTAINER/home/code/.Xauthority --uid 1000 --gid 1000 --mode 0600; \
+	incus exec $$CONTAINER -- rm -f /home/code/.Xauthority-c /home/code/.Xauthority-l; \
+	echo "==> Attaching PulseAudio socket to $$CONTAINER"; \
+	incus config device remove $$CONTAINER pulse-audio 2>/dev/null || true; \
+	incus config device add $$CONTAINER pulse-audio disk \
+		source=/run/user/$$(id -u)/pulse/native path=/tmp/pulse-native; \
+	echo "==> Installing xclip + pulseaudio-utils + ALSA PulseAudio plugin"; \
+	incus exec $$CONTAINER -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xclip pulseaudio-utils libasound2-plugins' >/dev/null; \
+	incus exec $$CONTAINER -- bash -c "printf '%s\n' \
+		'pcm.default pulse' 'ctl.default pulse' \
+		'pcm.pulse { type pulse }' 'ctl.pulse { type pulse }' \
+		> /etc/asound.conf"; \
+	incus exec $$CONTAINER -- bash -c "printf '%s\n' \
+		'export DISPLAY=:0' \
+		'export XAUTHORITY=/home/code/.Xauthority' \
+		'export PULSE_SERVER=unix:/tmp/pulse-native' \
+		> /etc/profile.d/x11-audio.sh && chmod 644 /etc/profile.d/x11-audio.sh"; \
+	incus exec $$CONTAINER -- bash -c 'grep -q "/etc/profile.d/x11-audio.sh" /etc/bash.bashrc || \
+		echo "[ -r /etc/profile.d/x11-audio.sh ] && . /etc/profile.d/x11-audio.sh" >> /etc/bash.bashrc'; \
+	xhost +si:localuser:root >/dev/null 2>&1 || true; \
+	echo "==> Done. Claude must be (re)started to pick up DISPLAY/PULSE_SERVER."
+
+# Internal — watcher that polls for the newly-started COI container (scoped
+# to this project's workspace) and attaches the SSH agent proxy + applies
+# startup fixes. Not meant to be invoked directly, but it's safe to.
+_coi-ssh-watcher:
+	@MAIN_GIT=$$(realpath $$(git rev-parse --git-common-dir 2>/dev/null) 2>/dev/null); \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+		sleep 3; \
+		CONTAINER=$$($(coi-this-container) | head -1); \
+		if [ -n "$$CONTAINER" ]; then \
+			incus config device remove $$CONTAINER ssh-agent 2>/dev/null || true; \
+			incus exec $$CONTAINER -- chmod 666 /var/run/docker.sock 2>/dev/null || true; \
+			test -f $(HOME)/.claude/settings.json && \
+				incus file push $(HOME)/.claude/settings.json $$CONTAINER$(COI_CLAUDE_HOME)/settings.json --uid 1000 --gid 1000 2>/dev/null || true; \
+			if [ -n "$(WORKTREE_SLUG)" ] && [ -n "$$MAIN_GIT" ]; then \
+				incus config device remove $$CONTAINER main-git-dir 2>/dev/null || true; \
+				incus config device add $$CONTAINER main-git-dir disk \
+					source=$$MAIN_GIT path=$$MAIN_GIT shift=true >/dev/null 2>&1 || true; \
+			fi; \
+			if incus config device add $$CONTAINER ssh-agent proxy \
+				connect=unix:$(COI_SSH_SOCK) \
+				listen=unix:/tmp/ssh-auth.sock \
+				bind=container \
+				uid=1000 gid=1000 mode=0600 >/dev/null 2>&1; then \
+				exit 0; \
+			fi; \
+		fi; \
+	done

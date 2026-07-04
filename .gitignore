@@ -1,0 +1,14 @@
+# Scratch / local
+tmp/
+*.bak
+*.bak.coi-self-bootstrap
+*.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
