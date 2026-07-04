@@ -1,11 +1,15 @@
-# .coi.toml — drop-in configuration for code-on-incus
+# .coi/config.toml — drop-in project configuration for code-on-incus (coi >= 0.9)
 #
-# Copy this file to <project>/.coi.toml (dotfile at repo root, NOT
-# <project>/.coi/config.toml — coi only auto-discovers $CWD/.coi.toml,
-# ~/.config/coi/config.toml, /etc/coi/config.toml, or $COI_CONFIG).
-# Verify with: `coi health` — must report `Config loaded: <path>`.
+# Location: <repo>/.coi/config.toml (the DIRECTORY form). In 0.9 this project
+# file is UNTRUSTED — it can arrive via a cloned repo — so:
+#   - out-of-workspace [[mounts.default]] are ignored until you run `coi trust`
+#     in the repo dir (see below);
+#   - security-downgrading settings (e.g. [network] mode = "open") are ignored
+#     here — put those in the TRUSTED ~/.coi/config.toml or a $COI_CONFIG file.
+# Verify discovery with: `coi health`  ->  `Config loaded: <path>`.
 #
-# Schema reference: `coi shell --help`, `coi health`, upstream README.
+# Schema reference: `coi --help`, `coi <cmd> --help`, `coi health`, upstream README.
+# NOTE: exact keys/flags track coi 0.9.x — re-verify after a `coi` upgrade.
 
 [tool]
 # Which coding agent to launch. "claude" (default), "opencode", "aider".
@@ -23,10 +27,14 @@ permission_mode = "bypass"
 forward_agent = true
 
 [network]
-# "restricted" (default) — allowlist: api.anthropic.com, common
-#   package registries, git hosts. Arbitrary egress blocked.
-# "open" — unrestricted egress. Use only when the agent needs
-#   unknown domains (scraping, rotating-endpoint APIs, WebRTC).
+# "restricted" (default) — allowlist: api.anthropic.com, common package
+#   registries, git hosts. Arbitrary egress blocked. Enforced with nft +
+#   iptables, which need passwordless sudo for /usr/sbin/nft (troubleshooting.md
+#   §10) — without it 0.9 refuses to boot the container.
+# "open" — unrestricted egress (scraping, rotating-endpoint APIs, WebRTC). This
+#   is a SECURITY DOWNGRADE, so 0.9 IGNORES it from THIS (untrusted) project
+#   file. To actually enable open egress, put `[network] mode = "open"` in the
+#   trusted ~/.coi/config.toml (host-wide) or a $COI_CONFIG file (per-project).
 mode = "restricted"
 
 [monitoring]
@@ -38,9 +46,9 @@ enabled = true
 # Tells tools inside the container where to find the forwarded agent.
 # Must match the `listen=` path used by the proxy device in the Makefile.
 SSH_AUTH_SOCK = "/tmp/ssh-auth.sock"
-# Add project-specific env vars here. Do NOT paste secrets into a
-# committed config — prefer `coi shell --env KEY=VALUE` or a .env
-# file loaded by the project itself.
+# Add project-specific env vars here. Do NOT paste secrets into a committed
+# config — prefer a .env file loaded by the project itself, or set them in
+# the trusted ~/.coi/config.toml.
 
 [defaults]
 # true  — container state (shell history, installed packages, in-progress
@@ -67,6 +75,11 @@ persistent = true
 #
 # Fields: host (supports `~`), container (absolute path), readonly (optional).
 # NEVER mount ~/.ssh or the full $HOME. See security invariants in the skill.
+#
+# TRUST (coi >= 0.9): the two mounts below resolve OUTSIDE /workspace, so 0.9
+# gates them — they are ignored on first launch until you approve them with
+# `coi trust` (run once in the repo dir). Re-run `coi trust` if you later change
+# a mount's host/container/readonly. See SKILL.md §2.4.
 [[mounts.default]]
 host = "~/.claude/projects"              # Claude history persists across containers
 container = "/home/code/.claude/projects"

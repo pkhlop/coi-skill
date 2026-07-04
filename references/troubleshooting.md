@@ -313,9 +313,16 @@ sed -i 's|http://archive.ubuntu.com/|http://us.archive.ubuntu.com/|g' /etc/apt/s
 
 ## 7. Upgrading
 
-- `make coi-update` (alias for `coi build`) — refreshes the image, next `coi shell` gets the new Claude.
+- `coi update` (0.9) — updates the `coi` binary + threat-detection databases. Re-running the
+  upstream install script also upgrades the binary.
+- `make coi-update` (alias for `coi build`) — refreshes the container *image*, next `coi shell` gets
+  the new Claude.
 - `claude update` — only persists in `--persistent` slots.
-- Never `npm install -g @anthropic-ai/claude-code` inside the container — it shadows the native install and breaks future `claude update`.
+- Never `npm install -g @anthropic-ai/claude-code` inside the container — it shadows the native
+  install and breaks future `claude update`.
+- **After any `coi` version bump, re-verify the config/trust/network model** — these have broken
+  across versions (see SKILL.md's "Version compatibility" callout and §10 below). Run `coi health`
+  and `coi --help` first.
 
 ---
 
@@ -382,7 +389,7 @@ Recognise the signature:
 Mitigation, in order of preference:
 
 1. **Pre-populate on host.** Run `pnpm install` (or equivalent) on the host before the first `make coi`. The bind-mounted `node_modules/` is visible inside the container unchanged — no write burst, no trigger.
-2. **Batch-install with monitoring off temporarily.** For projects where host-side install is impractical, `coi shell --monitor=false` (or flip `[monitoring] enabled` in `.coi.toml` for a single session). Re-enable afterwards — leaving monitoring off is a standing invitation to miss a real event. See §5 invariant #3 in SKILL.md.
+2. **Batch-install with monitoring off temporarily.** For projects where host-side install is impractical, set `[monitoring] enabled = false` in config for a single session, then re-enable. (0.9 removed the per-session `--monitor` flag — monitoring is config-only now.) Leaving monitoring off is a standing invitation to miss a real event. See §5 invariant #3 in SKILL.md.
 3. **Unfreeze and re-run.** `incus start <container>` resumes where it was; if the install had already written most of `node_modules` before the pause, the retry's burst may be small enough to stay under the threshold.
 
 ### 8.4 Resuming
@@ -451,3 +458,83 @@ If this command fails too, the headless_shell binary itself is broken (rare — 
 ### 9.5 Why not just disable crashpad in the launch args
 
 There's no stable Chrome flag for it. `--disable-features=Crashpad` doesn't exist; `--no-crash-upload` only suppresses the upload step. The crashpad handler is hard-wired into the full Chrome launch path. Routing around it via the headless_shell binary is the supported escape hatch.
+---
+
+## 10. `make coi` fatal on 0.9 — restricted-mode nft / untrusted mounts / ignored open network
+
+coi 0.9's trust model turns a working 0.7-era `.coi/config.toml` into a hard failure. Symptom
+(abridged) from `make coi`:
+
+```
+WARNING: ignoring security-downgrading "network.mode=open" in project config
+  .../.coi/config.toml; move it to ~/.coi/config.toml or set COI_CONFIG to apply it.
+[setup] Warning: ignoring untrusted mount from .../.coi/config.toml:
+  ~/.claude/projects -> /home/code/.claude/projects (resolves outside the workspace;
+  run 'coi trust' or set COI_TRUST_ALL=1)                       # ...and more mounts
+Error: setup-container: failed to setup session: boot network block failed in restricted
+  mode; ... failed to create nft table ip coi: nft command failed (output: sudo: a
+  password is required)
+```
+
+Three independent 0.9 behaviours are stacked here:
+
+### 10.1 `[network] mode = "open"` in the project file is IGNORED
+0.9 treats a committed `.coi/config.toml` as untrusted, so a *security-downgrading* setting like
+open egress is dropped. With no other source, COI falls back to `restricted`, which is what triggers
+10.2. **Fix:** put the downgrade in a trusted file:
+
+```bash
+mkdir -p ~/.coi
+cat > ~/.coi/config.toml <<'TOML'
+[network]
+mode = "open"          # trusted, applies host-wide
+TOML
+```
+
+Per-project instead of host-wide: `export COI_CONFIG=$PWD/.coi/config.toml` (a `$COI_CONFIG` file is
+trusted — only for a repo you own/review). The cosmetic `WARNING: ignoring security-downgrading…`
+still prints on every `coi` command because the project file still carries `mode = "open"`; harmless.
+
+### 10.2 Restricted mode needs passwordless sudo for nft (and iptables)
+Restricted mode builds an `nft` table + iptables rules to enforce the allowlist. Without passwordless
+sudo it can't, and 0.9 refuses to boot rather than run unprotected ("boot network block failed in
+restricted mode"). `coi health` NETWORKING rows show the exact fix; apply it if you actually want
+restricted mode:
+
+```bash
+echo "$USER ALL=(ALL) NOPASSWD: /usr/sbin/nft"      | sudo tee /etc/sudoers.d/coi-nft
+echo "$USER ALL=(ALL) NOPASSWD: /usr/sbin/iptables" | sudo tee /etc/sudoers.d/coi-iptables
+sudo chmod 0440 /etc/sudoers.d/coi-nft /etc/sudoers.d/coi-iptables
+```
+
+Open-mode users can skip nft entirely (`coi health` → `nft not required for open mode`), though a
+non-fatal bridge-forward iptables step still runs and may `[WARN]` on `iptables sudo`.
+
+### 10.3 Out-of-workspace mounts are gated until `coi trust`
+Any `[[mounts.default]]` whose host path resolves outside `/workspace` (e.g. `~/.claude/projects`,
+`~/.claude/skills`, a creds dir) is silently dropped until approved — so even a successful boot lacks
+Claude history/skills/etc. **Fix (run in the repo dir):**
+
+```bash
+coi trust
+coi trust --list        # -> <fingerprint>  /abs/path/.coi/config.toml
+```
+
+Re-approval is required only when a mount's host/container/`readonly` changes (fingerprint-pinned),
+not when unrelated settings change. `COI_TRUST_ALL=1` bypasses the gate — CI/automation only.
+
+### 10.4 Clean up and verify
+Remove the half-booted containers from the failed attempts, then verify without a full session:
+
+```bash
+coi kill <name> [<name> ...] --force
+coi health              # CONFIGURATION + NETWORKING should be all [OK]/[WARN], no [FAIL]
+```
+
+`coi health` → `[OK] Config loaded: <path>`, `[OK] Network mode: open`, and `[OK] Container connect:
+DNS and HTTP working` is proof the fix took, without launching an interactive agent.
+
+### 10.5 Host-immutable `.coi` during a session
+0.9 also `chattr +i`s protected dirs (`.coi`, `.husky`, `.vscode`) **while a container runs**, so a
+host-side edit of `.coi/config.toml` mid-session fails with `EPERM`. Edit when no session is running,
+or use the trusted `~/.coi/config.toml`. (`lsattr` shows the `i` flag only during an active session.)

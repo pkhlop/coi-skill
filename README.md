@@ -6,7 +6,7 @@ sandboxes that let an agent work autonomously (`--dangerously-skip-permissions`)
 putting the host at risk.
 
 This repo is **not** the sandbox itself — that's the upstream `coi` binary. This is the
-**operational layer** around it: a `SKILL.md` playbook, drop-in Makefile targets, a `.coi.toml`
+**operational layer** around it: a `SKILL.md` playbook, drop-in Makefile targets, a `.coi/config.toml`
 template, an inside-container self-bootstrap script, and a battle-tested troubleshooting
 reference. Install it once and Claude Code knows how to set up COI on a new host, onboard any
 project, forward your SSH agent, wire X11/audio, survive git worktrees, and recover from the
@@ -18,7 +18,7 @@ common failure modes.
 |---|---|
 | `SKILL.md` | The skill Claude Code loads: host setup, per-project onboarding, daily ops, security invariants |
 | `references/Makefile.snippet` | Drop-in `make coi*` targets (workspace-scoped, worktree-aware) |
-| `references/config.toml.template` | Annotated `.coi.toml` — the single config file per project |
+| `references/config.toml.template` | Annotated `.coi/config.toml` — the single config file per project |
 | `references/coi-self-bootstrap.sh` | Inside-container fixes that don't survive an image rebuild (Playwright, …) |
 | `references/troubleshooting.md` | Install-time pitfalls + runtime recovery (network, SSH, Docker, clipboard, monitor) |
 | `docs/PORTABILITY.md` | **Which knobs are generic vs host vs project vs OS**, and how to override each |
@@ -71,25 +71,33 @@ Override the target with `CLAUDE_HOME=/custom/.claude ./install.sh`.
 ./install.sh --project /path/to/your/repo
 ```
 
-This drops a `.coi.toml` (from the template) at the repo root and a `coi.mk` with the Makefile
+This drops a `.coi/config.toml` (directory form, coi ≥ 0.9) and a `coi.mk` with the Makefile
 targets, and prints the one-line `include coi.mk` to add to the project's `Makefile`. Then:
 
 ```bash
 cd /path/to/your/repo
+# add 'include coi.mk' to the Makefile, then:
+coi trust         # coi >= 0.9: approve the ~/.claude mounts (or the first boot lacks them)
 make coi          # launch sandboxed Claude Code
 ```
 
 ## Configuration
 
-COI is configured by **one file per project** (`.coi.toml`) plus a handful of Makefile variables
+COI is configured by **one file per project** (`.coi/config.toml`) plus a handful of Makefile variables
 with sane defaults. Nothing about a specific machine or project is hard-coded in the skill —
 `docs/PORTABILITY.md` classifies every knob (generic / host-environment / project / host-OS) and
 shows where it lives and how to override it. The short version:
 
-- **Per host:** `COI_SSH_SOCK` (agent socket, default `/tmp/ssh-agent-$USER.sock`)
-- **Per project:** `.coi.toml` (agent, network mode, mounts, persistence) + `COI_LOCAL_DOMAIN`,
-  language-runtime versions
+- **Per host:** `COI_SSH_SOCK` (agent socket, default `/tmp/ssh-agent-$USER.sock`); open-network mode
+  lives in the trusted `~/.coi/config.toml` (coi ≥ 0.9)
+- **Per project:** `.coi/config.toml` (agent, network mode, mounts, persistence) + a one-time
+  `coi trust` for the `~/.claude` mounts + `COI_LOCAL_DOMAIN`, language-runtime versions
 - **Per OS:** Incus install method + a couple of container tweaks (all documented, mostly automatic)
+
+> **Version note:** this skill is verified against **`coi 0.9.x`**. COI has made breaking changes
+> across versions (config-file location, the trust model, removed flags), so after any `coi` upgrade
+> run `coi health` and re-check the config/trust/network sections — `SKILL.md` opens with a
+> compatibility callout describing exactly what to re-verify.
 
 ## Credits & license
 

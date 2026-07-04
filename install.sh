@@ -4,7 +4,7 @@
 # Usage:
 #   ./install.sh                 Install the skill into ~/.claude/skills/coi/
 #   ./install.sh --check         Check host prerequisites (Incus, coi, jq, ssh-agent)
-#   ./install.sh --project DIR   Scaffold .coi.toml + coi.mk into a project (implies skill install)
+#   ./install.sh --project DIR   Scaffold .coi/config.toml + coi.mk into a project (implies skill install)
 #   ./install.sh --help
 #
 # Environment:
@@ -92,12 +92,13 @@ scaffold_project() {
   dir="$(cd "$dir" && pwd)"
   info "==> Onboarding project: $dir"
 
-  # .coi.toml (never overwrite an existing one)
-  if [ -e "$dir/.coi.toml" ]; then
-    warn ".coi.toml already exists — left untouched"
+  # .coi/config.toml — directory form (coi >= 0.9); never overwrite an existing one
+  if [ -e "$dir/.coi/config.toml" ]; then
+    warn ".coi/config.toml already exists — left untouched"
   else
-    cp "$SCRIPT_DIR/references/config.toml.template" "$dir/.coi.toml"
-    ok "wrote $dir/.coi.toml (from template — review [[mounts.default]] and [network])"
+    mkdir -p "$dir/.coi"
+    cp "$SCRIPT_DIR/references/config.toml.template" "$dir/.coi/config.toml"
+    ok "wrote $dir/.coi/config.toml (from template — review [[mounts.default]] and [network])"
   fi
 
   # coi.mk (Makefile targets as an includable fragment)
@@ -109,11 +110,15 @@ scaffold_project() {
   fi
 
   info ""
-  info "==> Final step — add this line to $dir/Makefile:"
-  info "${c_green}    include coi.mk${c_off}"
+  info "==> Final steps:"
+  info "    1. Add to $dir/Makefile:  ${c_green}include coi.mk${c_off}"
+  info "       (no Makefile? 'echo \"include coi.mk\" > Makefile' is enough to start.)"
+  info "    2. ${c_green}cd $dir && coi trust${c_off}   # coi >= 0.9: approve the ~/.claude mounts,"
+  info "       or the first 'make coi' boots without Claude history/skills. See SKILL.md §2.4."
+  info "    3. ${c_green}make coi${c_off}"
   info ""
-  info "    Then:  cd $dir && make coi"
-  info "    (If the project has no Makefile, 'echo \"include coi.mk\" > Makefile' is enough to start.)"
+  info "    Note: '[network] mode = \"open\"' only applies from ~/.coi/config.toml (trusted),"
+  info "    not the project file. See SKILL.md §4."
 }
 
 main() {

@@ -52,7 +52,7 @@ Incus is Linux-native, so on macOS you run it inside a lightweight Linux VM:
 1. Install [Lima](https://lima-vm.org/) or [Colima](https://github.com/abiosoft/colima).
 2. Bring up a Linux VM and install Incus inside it (Ubuntu/Debian steps above).
 3. COI auto-detects Lima/Colima and disables UID-shift (virtiofs doesn't support idmapped mounts) —
-   `.coi.toml` `[incus] disable_shift` is handled for you.
+   `.coi/config.toml` `[incus] disable_shift` is handled for you.
 
 Performance and idmap behaviour differ from native Linux; the workflow is otherwise identical.
 
@@ -119,6 +119,31 @@ If your agent lives elsewhere, override `COI_SSH_SOCK` instead (see `docs/PORTAB
 
 All green → `./install.sh` to install the skill, then `./install.sh --project <repo>` to onboard a
 project. Anything red → the line points at the fix (this doc or `references/troubleshooting.md`).
+
+## 7. Network mode & trust (coi ≥ 0.9)
+
+0.9 added a trust model that affects one-time host setup:
+
+- **If you run in `open` (unrestricted egress) mode** — put it in the **trusted** user-global file
+  (a project's committed config can't apply it):
+
+  ```bash
+  mkdir -p ~/.coi && printf '[network]\nmode = "open"\n' > ~/.coi/config.toml
+  ```
+
+- **If you run in `restricted` (allowlist) mode** — it enforces egress with `nft`, which needs
+  passwordless sudo or the container refuses to boot. `coi health` prints the exact lines:
+
+  ```bash
+  echo "$USER ALL=(ALL) NOPASSWD: /usr/sbin/nft"      | sudo tee /etc/sudoers.d/coi-nft
+  echo "$USER ALL=(ALL) NOPASSWD: /usr/sbin/iptables" | sudo tee /etc/sudoers.d/coi-iptables
+  sudo chmod 0440 /etc/sudoers.d/coi-nft /etc/sudoers.d/coi-iptables
+  ```
+
+- **Per project, once:** the `~/.claude/*` mounts resolve outside the workspace, so approve them with
+  `coi trust` in the repo dir — otherwise the first `make coi` boots without Claude history/skills.
+
+Full incident-style walkthrough: `references/troubleshooting.md §10`.
 
 ## When something breaks
 
