@@ -232,8 +232,9 @@ _coi-ssh-watcher:
 		if [ -n "$$CONTAINER" ]; then \
 			incus config device remove $$CONTAINER ssh-agent 2>/dev/null || true; \
 			incus exec $$CONTAINER -- chmod 666 /var/run/docker.sock 2>/dev/null || true; \
-			test -f $(HOME)/.claude/settings.json && \
-				incus file push $(HOME)/.claude/settings.json $$CONTAINER$(COI_CLAUDE_HOME)/settings.json --uid 1000 --gid 1000 2>/dev/null || true; \
+			SETTINGS_SRC=$(HOME)/.claude/coi-settings.json; [ -f "$$SETTINGS_SRC" ] || SETTINGS_SRC=$(HOME)/.claude/settings.json; \
+			test -f "$$SETTINGS_SRC" && \
+				incus file push "$$SETTINGS_SRC" $$CONTAINER$(COI_CLAUDE_HOME)/settings.json --uid 1000 --gid 1000 2>/dev/null || true; \
 			if [ -n "$(WORKTREE_SLUG)" ] && [ -n "$$MAIN_GIT" ]; then \
 				incus config device remove $$CONTAINER main-git-dir 2>/dev/null || true; \
 				incus config device add $$CONTAINER main-git-dir disk \

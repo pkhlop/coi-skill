@@ -283,6 +283,28 @@ untrusted repo's own `.coi/config.toml`.
 
 `.coi/config.toml` is safe to commit — it contains no secrets. But verify with the user before committing: some projects override `[environment]` with real values.
 
+### 2.6 Default Claude Code settings for every container
+
+Each container boots a **fresh** `/home/code/.claude` — the host's
+`~/.claude/settings.json` is not mounted in, and `coi shell` can't pass extra
+CLI args to `claude`. To make every container start Claude with chosen defaults
+(reasoning effort, `ultracode`, model, `includeCoAuthoredBy: false`, …) there are
+two channels: **env vars** in the trusted `~/.coi/config.toml` `[environment]`
+(host-wide, applied at container creation) and a **pushed `settings.json`** (the
+`_coi-ssh-watcher` target copies `~/.claude/coi-settings.json` → the container on
+every `make coi`). Keep a **dedicated `~/.claude/coi-settings.json`** rather than
+pushing your host settings.json, so sandbox-only keys (like `ultracode: true`)
+don't leak into your host sessions and host-UI cruft (figma/voice/tui) doesn't
+leak into the sandbox.
+
+Key gotchas: `ultracode` is a real settings.json **boolean** (persistable, not
+CLI-only); `effortLevel` enum tops out at `xhigh`; **coi has no classifier "auto"
+permission mode** (only `bypass`/`interactive` — `bypass` is the right choice
+inside the sandbox); and **`model` must be set in `~/.coi/config.toml`** (coi
+manages `--model` and its default profile pins `claude-sonnet-4-5`). Full recipe,
+verified key/flag/env names, and the rollout/verification steps are in
+`references/claude-settings.md`.
+
 ---
 
 ## 3. Daily operation
@@ -579,5 +601,6 @@ These MUST hold. If a setup step would violate one, refuse and surface the confl
 
 - `references/config.toml.template` — drop-in `.coi/config.toml`.
 - `references/Makefile.snippet` — drop-in Makefile section.
+- `references/claude-settings.md` — make every container start Claude with chosen defaults (effort, `ultracode`, model, attribution) via `~/.coi` env + a dedicated `coi-settings.json` push (§2.6).
 - `references/troubleshooting.md` — install-time pitfalls, SSH/Docker/clipboard debugging, IPv6/apt slowness fix (§6), performance baseline, Incus reset procedure.
 - Upstream: https://github.com/mensfeld/code-on-incus (README is authoritative; if this skill contradicts it, trust the README and flag the drift).

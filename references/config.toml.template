@@ -49,6 +49,12 @@ SSH_AUTH_SOCK = "/tmp/ssh-auth.sock"
 # Add project-specific env vars here. Do NOT paste secrets into a committed
 # config — prefer a .env file loaded by the project itself, or set them in
 # the trusted ~/.coi/config.toml.
+#
+# To make EVERY container start Claude Code with chosen defaults (reasoning
+# effort, ultracode, model, includeCoAuthoredBy, …), don't put them here —
+# host-wide Claude defaults belong in the trusted ~/.coi/config.toml
+# [environment] + a dedicated ~/.claude/coi-settings.json. See
+# references/claude-settings.md (SKILL.md §2.6).
 
 [defaults]
 # true  — container state (shell history, installed packages, in-progress
