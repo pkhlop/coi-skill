@@ -23,11 +23,12 @@ Legend: **Generic** = works everywhere unchanged · **Host** = varies per machin
 | Network mode `open` (downgrade) | Host | **`~/.coi/config.toml`** `[network] mode` | off | trusted file only — ignored in project file (0.9) |
 | Trust approval for out-of-workspace mounts | Project | `coi trust` store (fingerprint-pinned) | not approved | `coi trust` in repo; `COI_TRUST_ALL=1` in CI |
 | Threat monitoring | Generic | `.coi/config.toml` `[monitoring] enabled` | `true` | leave on (security invariant) |
-| Container persistence | Project | `.coi/config.toml` `[defaults] persistent` | `true` | `false` for ephemeral |
+| Container persistence | Project | `.coi/config.toml` `[container] persistent` | `true` | `false` for ephemeral (`[defaults] persistent` was removed in 0.8.0 — hard error) |
 | Resource limits | Project | `.coi/config.toml` `[limits]` | unset | uncomment + set |
 | **SSH agent socket path** | **Host** | `coi.mk` `COI_SSH_SOCK` | `/tmp/ssh-agent-$USER.sock` | `make coi COI_SSH_SOCK=…` or shell rc |
-| Claude history / skills mounts | Generic | `.coi/config.toml` `[[mounts.default]]` | `~/.claude/{projects,skills}` | Claude-Code-user paths; rarely changed |
-| Project-specific mounts | Project | `.coi/config.toml` `[[mounts.default]]` | none | add entries |
+| Claude history / skills mounts | Generic | `.coi/config.toml` `[[mounts.default]]` | `~/.claude/{projects,skills}` | keep them — the built-in profile lists them but does not attach them (SKILL §2.1); needs `coi trust` |
+| Project-specific mounts | Project | `.coi/config.toml` `[[mounts.default]]` | none | add entries (flat `[[mounts]]` is profile-only — hard error here) |
+| Container env vars | Project | `.coi/config.toml` `[defaults.environment]` | none | top-level `[environment]` is silently ignored |
 | **Local dev domain** | **Project** | `coi.mk` `COI_LOCAL_DOMAIN` | `<dirname>.test` | set per repo |
 | `/etc/hosts` hostnames (`api.`/`admin.`) | Project | `coi.mk` `coi-hosts` target | `api.`/`admin.` prefixes | edit the `HOSTS=` line |
 | Worktree namespacing | Project | `.worktree-slug` file + `coi.mk` | empty (main worktree) | one-line slug file |

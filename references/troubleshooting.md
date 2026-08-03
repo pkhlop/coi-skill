@@ -127,18 +127,51 @@ Default pool is a 1.8 GiB loop file that gets oversubscribed by Incus images. Ei
 
 ### 2.1 `ssh-add -l` fails inside the container
 
-Ordered fixes:
+**First, know what "working" looks like on coi ≥ 0.9.** Forwarding is native: with
+`[ssh] forward_agent = true`, coi attaches the proxy device at
+`listen=unix:/tmp/ssh-agent.sock` and exports `SSH_AUTH_SOCK=/tmp/ssh-agent.sock`.
+No Makefile target is involved at startup. Launch output shows:
+
+```
+Forwarding socket: /tmp/ssh-agent-<user>.sock -> /tmp/ssh-agent.sock
+Device ssh-agent added to coi-xxxxxxxx-1
+```
+
+Ordered diagnosis:
 
 ```bash
 # Host
 ssh-add -l                                      # agent must be live and have keys
-echo "$SSH_AUTH_SOCK"                           # must be the path COI expects
-make coi-ssh-fix                                # re-attaches the Incus proxy device
+echo "$SSH_AUTH_SOCK"                           # host agent path coi will connect to
+incus config device show <container> | grep -A6 '^ssh-agent:'   # listen: must be /tmp/ssh-agent.sock
 
 # Container
-export SSH_AUTH_SOCK=/tmp/ssh-auth.sock
+echo "$SSH_AUTH_SOCK"                           # must be /tmp/ssh-agent.sock
 ssh-add -l
+
+# Host — repair only, if the host agent restarted mid-session
+make coi-ssh-fix
 ```
+
+**Most common cause: a Makefile fighting coi.** If `listen:` is anything other than
+`/tmp/ssh-agent.sock` — classically `/tmp/ssh-auth.sock` — a project Makefile is
+removing coi's device at startup and re-creating it elsewhere. That pattern came from
+pre-0.9 guidance and pairs with `[environment] SSH_AUTH_SOCK = "/tmp/ssh-auth.sock"`
+in the project config, which lands in a table coi does not read. Net effect: the socket
+exists, `SSH_AUTH_SOCK` is unset in every process, and `ssh-add -l` reports
+`Could not open a connection to your authentication agent`.
+
+Confirm with:
+
+```bash
+# Empty output = no process in the container has SSH_AUTH_SOCK at all
+incus exec <container> -- bash -c 'for p in /proc/[0-9]*; do tr "\0" "\n" < $p/environ 2>/dev/null | grep ^SSH_AUTH_SOCK=; done | sort -u'
+```
+
+Fix it at the source: remove the `ssh-agent` device lines from the project's
+`_coi-post-start` / `_coi-ssh-watcher` recipe and drop the `SSH_AUTH_SOCK` entry from
+`.coi/config.toml`, then recreate the container (`make coi-clean && make coi`). Do not
+paper over it with `export SSH_AUTH_SOCK=...` in `~/.bashrc`.
 
 If `make coi-ssh-fix` errors with "Device ssh-agent already exists", the remove step was skipped — run it manually:
 

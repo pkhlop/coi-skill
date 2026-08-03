@@ -20,8 +20,17 @@ So there are exactly two channels to get settings into every container:
 
 | Channel | Vehicle | Applies to | Timing |
 |---|---|---|---|
-| **Environment variables** | `[environment]` in the trusted `~/.coi/config.toml` (backs the built-in `default` profile → merges into every `coi shell`, no `--profile`) | settings with an env-var form (`CLAUDE_CODE_*`, `DISABLE_*`, `MAX_THINKING_TOKENS`, …) and coi's own `model` | **container creation** — recreate persistent containers to pick up changes |
-| **A pushed `settings.json`** | The Makefile `_coi-ssh-watcher` runs `incus file push … → /home/code/.claude/settings.json` on **every** `make coi` | any settings.json key (`effortLevel`, `ultracode`, `includeCoAuthoredBy`, `cleanupPeriodDays`, …) | **every `make coi`** — re-pushed each launch, so no recreate needed for settings.json-only changes |
+| **Environment variables** | **`[defaults.environment]`** in the trusted `~/.coi/config.toml` (merges into every `coi shell`, no `--profile`) | settings with an env-var form (`CLAUDE_CODE_*`, `DISABLE_*`, `MAX_THINKING_TOKENS`, …) | **container creation** — recreate persistent containers to pick up changes |
+| **A pushed `settings.json`** | The Makefile `_coi-post-start` runs `incus file push … → /home/code/.claude/settings.json` on **every** `make coi` | any settings.json key (`effortLevel`, `ultracode`, `includeCoAuthoredBy`, `cleanupPeriodDays`, …) | **every `make coi`** — re-pushed each launch, so no recreate needed for settings.json-only changes |
+
+> ### ⚠ `[environment]` vs `[defaults.environment]`
+>
+> `~/.coi/config.toml` is **not** parsed with the profile schema. A top-level
+> `[environment]` table there parses without error and is then **silently ignored** —
+> the classic symptom is a `DISABLE_TELEMETRY = "1"` that has never once applied.
+> The key that works is `[defaults.environment]`. Verified on coi 0.9.0 by setting
+> both forms and reading them back inside a container. Same trap in a project
+> `.coi/config.toml` (skill §2.1).
 
 ## The pattern: a dedicated `~/.claude/coi-settings.json`
 
@@ -45,7 +54,7 @@ the sandbox-appropriate keys, and have the Makefile push **that**:
 }
 ```
 
-The Makefile push (in `references/Makefile.snippet`, target `_coi-ssh-watcher`)
+The Makefile push (in `references/Makefile.snippet`, target `_coi-post-start`)
 prefers the dedicated file and falls back to the host settings.json so it stays
 backward-compatible:
 
@@ -60,15 +69,15 @@ can still edit its own settings.json inside the container.
 ## Host-wide env defaults in `~/.coi/config.toml`
 
 `~/.coi/config.toml` is trusted and merges into every container. Put env-capable
-settings and `model` here (top-level `model` must precede any `[table]`):
+settings here — under `[defaults.environment]`, **not** `[environment]`:
 
 ```toml
-model = "opus"                 # overrides the built-in default profile's claude-sonnet-4-5
+model = "opus"                 # see the model caveat below — verify before relying on this
 
 [network]
 mode = "open"
 
-[environment]
+[defaults.environment]
 DISABLE_TELEMETRY = "1"        # opt every container out of telemetry + feature-flag fetch
 # DISABLE_AUTOUPDATER = "1"    # optional: pin claude to the image build, no in-container self-update
 ```
@@ -84,12 +93,23 @@ DISABLE_TELEMETRY = "1"        # opt every container out of telemetry + feature-
   values). There is also an env form, **`CLAUDE_CODE_EFFORT_LEVEL`**, which
   *overrides* settings.json and prints a "overrides this session" notice — prefer
   the settings.json key to avoid the notice.
-- **Model: coi manages `--model` itself.** The built-in `default` profile pins
-  `model = "claude-sonnet-4-5"`; set top-level `model = "opus"` in `~/.coi/config.toml`
-  to override it (the `opus` alias tracks the latest Opus). Setting `model` only
-  in settings.json is *not* reliable — coi's `--model` flag can override it — so
-  set it in `~/.coi/config.toml` (authoritative) and optionally mirror it in
-  `coi-settings.json` (harmless, same value).
+- **Model: UNRESOLVED on 0.9.0 — verify before relying on either channel.** The
+  built-in profile does declare a model (`coi profile info default` →
+  `model = "claude-sonnet-4-5"`), which is why earlier revisions of this file said
+  "coi manages `--model` itself" and told you to set `model` in `~/.coi/config.toml`.
+  That claim does not survive inspection: on a live 0.9.0 container the launched
+  process is
+  ```
+  claude --dangerously-skip-permissions --enable-auto-mode
+  ```
+  — **no `--model` flag**, and no model-related variable in its environment. So the
+  profile's model is not reaching the CLI by either route observed here. Until this
+  is pinned down, treat `model` in `coi-settings.json` as the channel most likely to
+  work (it is read by Claude Code directly), keep `model` in `~/.coi/config.toml` as
+  harmless belt-and-braces, and **check what actually launched**:
+  ```bash
+  incus exec <container> -- bash -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null | grep -m1 "^claude "; done'
+  ```
 - **coi has no classifier "auto" permission mode.** `[tool] permission_mode`
   accepts only **`"bypass"`** (→ `--permission-mode bypassPermissions`) and
   **`"interactive"`** (prompts). Inside a COI sandbox `bypass` is the intended
@@ -122,11 +142,14 @@ DISABLE_TELEMETRY = "1"        # opt every container out of telemetry + feature-
 
 ## Verifying
 
-- **Env / network merge:** `coi health` → `Config loaded` + `Network mode`. If
-  `mode = "open"` is effective and only `~/.coi/config.toml` sets it, that file is
-  merging → its `model`/`[environment]` apply too. (`coi profile info default`
+- **Never infer one key from another.** `coi health` → `Config loaded` +
+  `Network mode` proves only that the *file* was found and that `[network]` merged.
+  It says nothing about the other tables: on 0.9.0 `[network] mode = "open"` from
+  `~/.coi/config.toml` applies while a top-level `[environment]` in the same file is
+  dropped. "The file is merging, therefore its env applies" is exactly the reasoning
+  that hid that bug — check each channel on its own. (`coi profile info default`
   shows the **built-in** profile, `Source: (built-in)` — it is *not* the merged
-  effective config, so don't use it to check your overrides.)
+  effective config, so don't use it to check your overrides either.)
 - **A concrete container check:** `coi run 'bash -lc "printenv DISABLE_TELEMETRY; cat ~/.claude/settings.json"'`
   in a scratch workspace spins up a throwaway container (does not touch persistent
   slots). Note: if the workspace's `.coi/config.toml` has `persistent = true`,

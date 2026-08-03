@@ -3,8 +3,22 @@
 # Assumes the user's SSH agent is at $COI_SSH_SOCK on the host — see
 # skill §1.3 for the one-time shell-rc setup.
 #
-# Bind mounts (including ~/.claude/projects and ~/.claude/skills) are
-# declared in .coi/config.toml under [[mounts.default]], NOT here.
+# Bind mounts (including ~/.claude/projects and ~/.claude/skills) are declared
+# in .coi/config.toml under [[mounts.default]], NOT here — and they need one
+# `coi trust` in the repo dir before coi will attach them.
+#
+# SSH AGENT: HANDS OFF (coi >= 0.9)
+# ---------------------------------
+# coi forwards the agent natively when `[ssh] forward_agent = true`: it attaches
+# the proxy device (listen=unix:/tmp/ssh-agent.sock) AND exports
+# SSH_AUTH_SOCK=/tmp/ssh-agent.sock inside the container. Nothing here needs to
+# attach it. An earlier revision of this snippet tore that device down on
+# startup and re-created it at /tmp/ssh-auth.sock, relying on an `[environment]`
+# entry in the project config to repoint SSH_AUTH_SOCK — but that entry sits in
+# a table coi doesn't read, so the net effect was a live socket no process knew
+# about and `ssh-add -l` failing in every container. Do not reintroduce
+# startup-time ssh-agent churn. `coi-ssh-fix` repairs the device on demand only,
+# at coi's own path.
 #
 # ISOLATION INVARIANT
 # -------------------
@@ -21,6 +35,10 @@ COI_SSH_SOCK     ?= /tmp/ssh-agent-$(USER).sock
 COI_CLAUDE_HOME  := /home/code/.claude
 COI_LOCAL_DOMAIN ?= $(notdir $(CURDIR)).test
 
+# Container-side agent socket. This is coi's own path — keep it in sync with
+# coi, never with a value invented here (see "SSH AGENT: HANDS OFF" above).
+COI_SSH_SOCK_CONTAINER := /tmp/ssh-agent.sock
+
 # Worktree slug (see SKILL.md §3.10). Empty in the main worktree → hostnames
 # render unprefixed. Non-empty in a sibling worktree → hostnames become
 # <slug>.<COI_LOCAL_DOMAIN> and /etc/hosts lines are tagged with a
@@ -34,22 +52,22 @@ COI_HOSTS_SENTINEL := coi-hosts:$(if $(WORKTREE_SLUG),$(WORKTREE_SLUG),main)
 COI_THIS_JQ := (.active_containers // [])[] | select(.workspace==$$ws and .status=="Running") | .name
 coi-this-container = coi list --format json 2>/dev/null | jq -r --arg ws '$(CURDIR)' '$(COI_THIS_JQ)'
 
-.PHONY: coi coi-resume coi-debug coi-ssh-fix coi-docker-fix coi-git-fix coi-hosts coi-hosts-clean coi-clean coi-containers coi-update coi-extras coi-x11 coi-self-bootstrap _coi-ssh-watcher
+.PHONY: coi coi-resume coi-debug coi-bash coi-bash-claude coi-ssh-fix coi-docker-fix coi-git-fix coi-hosts coi-hosts-clean coi-clean coi-containers coi-update coi-extras coi-x11 coi-self-bootstrap _coi-post-start
 
 coi: ## Launch Claude Code in a sandboxed Incus container
 	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
-	@echo "==> Starting COI sandbox (SSH proxy attaches in background)..."
-	@( $(MAKE) --no-print-directory _coi-ssh-watcher >/dev/null 2>&1 & )
+	@echo "==> Starting COI sandbox (post-start fixes apply in background)..."
+	@( $(MAKE) --no-print-directory _coi-post-start >/dev/null 2>&1 & )
 	@coi shell
 
 coi-resume: ## Resume the most recent Claude Code COI session
 	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
-	@( $(MAKE) --no-print-directory _coi-ssh-watcher >/dev/null 2>&1 & )
+	@( $(MAKE) --no-print-directory _coi-post-start >/dev/null 2>&1 & )
 	@coi shell --resume
 
 coi-debug: ## Launch bash in a sandboxed Incus container (no Claude)
 	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
-	@( $(MAKE) --no-print-directory _coi-ssh-watcher >/dev/null 2>&1 & )
+	@( $(MAKE) --no-print-directory _coi-post-start >/dev/null 2>&1 & )
 	@coi shell --debug
 
 coi-containers: ## List COI containers bound to this project's workspace
@@ -57,18 +75,37 @@ coi-containers: ## List COI containers bound to this project's workspace
 		'(.active_containers // [])[] | select(.workspace==$$ws) | "  " + .name + " (" + .status + ", " + .ipv4 + ")"' \
 		| { grep . || echo "  (none)"; }
 
-coi-ssh-fix: ## Re-attach SSH agent proxy to running COI container (idempotent)
+# ── Attach to a RUNNING container ───────────────
+# `coi`/`coi-resume`/`coi-debug` all start a NEW coi session. The two targets
+# below attach to the container that is already up, so you can inspect or work
+# alongside a live sandbox without disturbing the tmux session Claude is in.
+# They are also the escape hatch from tmux: `coi shell` runs Claude inside tmux,
+# where scrollback is copy-mode rather than your terminal's native buffer.
+
+coi-bash: ## Interactive bash in the ALREADY-RUNNING container (no tmux, no Claude)
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR)) — start one with 'make coi' first"; exit 1; }; \
+	echo "==> Attaching bash to $$CONTAINER as user code (/workspace)"; \
+	incus exec $$CONTAINER --cwd /workspace -- runuser -u code -- bash -l
+
+coi-bash-claude: ## Claude in the ALREADY-RUNNING container, no tmux (native scrollback). Extra flags via ARGS=…
+	@CONTAINER=$$($(coi-this-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR)) — start one with 'make coi' first"; exit 1; }; \
+	echo "==> Launching Claude Code in $$CONTAINER as user code (/workspace)"; \
+	incus exec $$CONTAINER --cwd /workspace -- runuser -u code -- bash -lc 'exec claude $(ARGS)'
+
+coi-ssh-fix: ## REPAIR the SSH agent proxy after a host agent restart (idempotent)
 	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK)"; exit 1; }
 	@CONTAINER=$$($(coi-this-container) | head -1); \
 	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR))"; exit 1; }; \
-	echo "==> Re-attaching ssh-agent proxy to $$CONTAINER"; \
+	echo "==> Re-attaching ssh-agent proxy to $$CONTAINER at $(COI_SSH_SOCK_CONTAINER)"; \
 	incus config device remove $$CONTAINER ssh-agent 2>/dev/null || true; \
 	incus config device add $$CONTAINER ssh-agent proxy \
 		connect=unix:$(COI_SSH_SOCK) \
-		listen=unix:/tmp/ssh-auth.sock \
+		listen=unix:$(COI_SSH_SOCK_CONTAINER) \
 		bind=container \
 		uid=1000 gid=1000 mode=0600; \
-	echo "==> Inside container: export SSH_AUTH_SOCK=/tmp/ssh-auth.sock && ssh-add -l"
+	echo "==> Verify inside the container: ssh-add -l   (coi already exports SSH_AUTH_SOCK=$(COI_SSH_SOCK_CONTAINER))"
 
 coi-git-fix: ## Bind-mount main worktree's .git into the running container so git resolves worktree paths (no-op in main worktree)
 	@if [ -z "$(WORKTREE_SLUG)" ]; then \
@@ -221,16 +258,21 @@ coi-x11: ## Attach X11 clipboard + PulseAudio microphone to running COI containe
 	xhost +si:localuser:root >/dev/null 2>&1 || true; \
 	echo "==> Done. Claude must be (re)started to pick up DISPLAY/PULSE_SERVER."
 
-# Internal — watcher that polls for the newly-started COI container (scoped
-# to this project's workspace) and attaches the SSH agent proxy + applies
-# startup fixes. Not meant to be invoked directly, but it's safe to.
-_coi-ssh-watcher:
+# Internal — polls for this project's freshly-started container and applies the
+# post-start fixes coi does NOT do itself: docker.sock perms, the pushed
+# settings.json, and (in a child worktree) the main .git bind mount.
+#
+# It deliberately does NOT touch the ssh-agent device — coi already attached it
+# correctly and exported the matching SSH_AUTH_SOCK. See "SSH AGENT: HANDS OFF"
+# at the top of this section before adding anything here.
+#
+# Not meant to be invoked directly, but it's safe to.
+_coi-post-start:
 	@MAIN_GIT=$$(realpath $$(git rev-parse --git-common-dir 2>/dev/null) 2>/dev/null); \
-	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+	for i in $$(seq 1 20); do \
 		sleep 3; \
 		CONTAINER=$$($(coi-this-container) | head -1); \
 		if [ -n "$$CONTAINER" ]; then \
-			incus config device remove $$CONTAINER ssh-agent 2>/dev/null || true; \
 			incus exec $$CONTAINER -- chmod 666 /var/run/docker.sock 2>/dev/null || true; \
 			SETTINGS_SRC=$(HOME)/.claude/coi-settings.json; [ -f "$$SETTINGS_SRC" ] || SETTINGS_SRC=$(HOME)/.claude/settings.json; \
 			test -f "$$SETTINGS_SRC" && \
@@ -240,12 +282,6 @@ _coi-ssh-watcher:
 				incus config device add $$CONTAINER main-git-dir disk \
 					source=$$MAIN_GIT path=$$MAIN_GIT shift=true >/dev/null 2>&1 || true; \
 			fi; \
-			if incus config device add $$CONTAINER ssh-agent proxy \
-				connect=unix:$(COI_SSH_SOCK) \
-				listen=unix:/tmp/ssh-auth.sock \
-				bind=container \
-				uid=1000 gid=1000 mode=0600 >/dev/null 2>&1; then \
-				exit 0; \
-			fi; \
+			exit 0; \
 		fi; \
 	done

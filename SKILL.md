@@ -18,10 +18,18 @@ Before acting on anything `sudo`-level or on a file outside the target project, 
 > ### ⚠ Version compatibility — verified against `coi 0.9.x`
 >
 > **COI makes breaking changes across versions**, and this skill's exact paths, flags, and config
-> keys track a specific one. Known examples between 0.7 and 0.9 alone: config discovery moved from a
-> flat `.coi.toml` to the directory form **`.coi/config.toml`**; an **untrusted-project-config trust
-> model** was added (`coi trust`, mount gating, security-downgrade gating); the per-session
-> **`--network` flag was removed**; and `coi update` was added.
+> keys track a specific one. Known examples between 0.7 and 0.9 alone: `[defaults] persistent` was
+> **removed in 0.8.0** and is now a hard load error; config discovery moved from a flat `.coi.toml`
+> to the directory form **`.coi/config.toml`**; an **untrusted-project-config trust model** was added
+> (`coi trust`, mount gating, security-downgrade gating); the per-session **`--network` flag was
+> removed**; SSH-agent forwarding became **fully native** (device + `SSH_AUTH_SOCK`, §3.3); and
+> `coi update` was added.
+>
+> **The dangerous drift is the silent kind.** A removed key errors loudly and gets fixed. A key that
+> moved to a different *table* (`[environment]` → `[defaults.environment]`) parses fine and does
+> nothing, and guidance built on top of it keeps looking correct while the feature is dead. When
+> validating this skill against a new coi, don't just check that things *load* — check that they
+> *applied* (§2.7).
 >
 > **Whenever `coi` is (or may have been) upgraded** — `coi update`, re-running the installer, a
 > distro/package bump, or a fresh machine — treat this skill as *possibly stale* and re-verify before
@@ -31,9 +39,13 @@ Before acting on anything `sudo`-level or on a file outside the target project, 
 >    is "needs re-verification"; prefer `coi --help`, `coi health`, and the upstream README.
 > 2. `coi health` — the fastest one-shot check; its `CONFIGURATION` (`Config loaded`, `Network mode`)
 >    and `NETWORKING` rows surface most breakage immediately.
-> 3. Re-read **§2.1** (config discovery), **§2.4** (trust model), and **§4** (network) — these are the
->    surfaces that have actually broken across versions.
-> 4. If a documented command errors or a setting is silently ignored, suspect version drift first,
+> 3. `coi profile info default` — shows the built-in profile (image, persistence, network allowlist).
+>    Useful context, but **not a statement of what a container will get**: its `[[mounts]]` list the
+>    two `~/.claude` paths that a project run does *not* actually receive unless the project config
+>    declares them (§2.1). Treat it as documentation of defaults, not as effective config.
+> 4. Re-read **§2.1** (config schema + discovery), **§2.4** (trust model), **§3.3** (SSH), and **§4**
+>    (network) — these are the surfaces that have actually broken across versions.
+> 5. If a documented command errors *or a setting is silently ignored*, suspect version drift first,
 >    check `coi <cmd> --help`, and flag the contradiction rather than forcing the old behavior.
 
 ---
@@ -109,6 +121,23 @@ Verify discovery with `coi health` → `Config loaded: <path>` and `Network mode
 > `$COI_CONFIG` (see §2.4 and §4). The directory form is canonical and is what `coi trust`,
 > `coi shell`, and the config warnings all key on.
 
+> ### ⚠ The project config and a profile config are DIFFERENT schemas
+>
+> Both are TOML, both live in a `.coi` directory, and the table names overlap just enough to be
+> dangerous. Writing a project config in profile syntax is the most common way to produce a file that
+> silently does nothing:
+>
+> | Setting | `<repo>/.coi/config.toml` **and** `~/.coi/config.toml` | profile file (`coi profile`, `--profile`) |
+> |---|---|---|
+> | Env vars | `[defaults.environment]` | `[environment]` |
+> | Extra mounts | `[[mounts.default]]` | `[[mounts]]` |
+> | Persistence | `[container] persistent` | `[container] persistent` |
+>
+> A top-level `[environment]` in a project or user-global config **parses without error and is then
+> ignored**. Flat `[[mounts]]` there is a hard load error (`type mismatch for config.MountsConfig`).
+> **`coi schema profile` prints the PROFILE schema — do not validate `.coi/config.toml` against it.**
+> Verify a project config empirically instead (§2.7).
+
 Template at `references/config.toml.template`. Minimal production-ready version:
 
 ```toml
@@ -116,54 +145,66 @@ Template at `references/config.toml.template`. Minimal production-ready version:
 name = "claude"
 permission_mode = "bypass"          # --dangerously-skip-permissions equivalent
 
-[ssh]
-forward_agent = true                # requires Makefile target to attach the proxy
+[container]
+persistent = true                   # survives across shells; false = ephemeral
+                                    # NOT [defaults] persistent — removed in 0.8.0, see below
 
-[network]
-mode = "restricted"                 # project file may only REQUEST restricted; "open" is a
-                                    # security-downgrade → must live in ~/.coi/config.toml (§2.4/§4)
+[ssh]
+forward_agent = true                # fully native in 0.9 — no Makefile help needed (§3.3)
 
 [monitoring]
 enabled = true                      # threat-detection auto-pause
 
-[environment]
-SSH_AUTH_SOCK = "/tmp/ssh-auth.sock"  # must match listen path in Makefile proxy command
+# [network] omitted on purpose — see §4. "open" is ignored from this untrusted
+# file; "restricted" IS honored and will refuse to boot on a host without nft
+# sudo. Check `coi health` → "nft firewall" before adding it.
 
-[defaults]
-persistent = true                   # survives across shells; set false for ephemeral
-
-# Bind mounts — applied at container creation. UID shift on by default
-# (see [incus] disable_shift), so files appear as owned by the container's
-# `code` user (uid 1000) regardless of host ownership — fixes the classic
-# `nobody:nogroup` / Operation-not-permitted problem on bind-mounted paths.
+# Bind mounts — applied at container creation. UID shift is on by default, so
+# files appear owned by the container's `code` user (uid 1000) regardless of
+# host ownership, which avoids the classic nobody:nogroup problem.
 [[mounts.default]]
 host = "~/.claude/projects"              # Claude history survives across containers
 container = "/home/code/.claude/projects"
 
 [[mounts.default]]
-host = "~/.claude/skills"
+host = "~/.claude/skills"                # required by `make coi-self-bootstrap`
 container = "/home/code/.claude/skills"
 ```
 
 Copy, adjust, explain each line to the user before writing to `<project>/.coi/config.toml`.
 
+**Two keys that will bite you.** Both verified on 0.9.0:
+
+- **`[defaults] persistent` is gone.** It was removed in **0.8.0** and is now a *hard load error*, not a warning:
+  ```
+  Error: failed to load project config …
+    [defaults] persistent = true is no longer supported in 0.8.0.
+    Move it under [container]:
+  ```
+  A config carrying it cannot launch at all. Use `[container] persistent`.
+- **Env vars must go in `[defaults.environment]`.** A top-level `[environment]` table is silently dropped. This also applies to the trusted `~/.coi/config.toml` — a `[environment] DISABLE_TELEMETRY = "1"` there has never applied.
+
 **Mount caveats to flag when onboarding:**
 
-- Mounts are **only applied on container creation.** If `[defaults] persistent = true` and a container already exists, editing `[[mounts.default]]` has no effect until the container is destroyed (`make coi-clean`) and recreated (`make coi`). coi logs `"Reusing existing workspace and mount configurations"` on the reuse path.
+- **The two `~/.claude` mounts are load-bearing — keep them.** `coi profile info default` lists the same two paths under the built-in profile's `[[mounts]]`, which makes declaring them here look redundant. It isn't: verified on 0.9.0, a project whose config declares no mounts gets **no mount device at all** (launch logs only `Device workspace` + the `protect-*` set) and `/home/code/.claude/{projects,skills}` are empty container-local directories. Declared and trusted, they attach as `mount-0` / `mount-1` with real host content. Don't drop them on the strength of the profile listing.
+- **Verify mounts by device, not from inside.** `Device mount-N added to <container>` in the launch output and `incus config device show <container>` are authoritative. Probing with `mountpoint` inside the container can report a path as mounted when no device backs it — that false signal is exactly what makes the previous bullet tempting to get wrong.
+- Mounts are **only applied on container creation.** With `[container] persistent = true` and an existing container, editing `[[mounts.default]]` has no effect until `make coi-clean` destroys it and `make coi` recreates it. coi logs `"Reusing existing workspace and mount configurations"` on the reuse path.
 - Fields per entry: `host` (supports `~` expansion), `container` (must be absolute), `readonly` (bool, optional).
 - To hot-attach a mount to an already-running container without destroying it: `incus config device add <container> <name> disk source=<host> path=<container> shift=true` — `shift=true` is critical or the files show as `nobody:nogroup`.
-- **Out-of-workspace mounts are trust-gated (0.9).** Any `[[mounts.default]]` whose host path resolves outside `/workspace` — including the `~/.claude/projects` and `~/.claude/skills` mounts above — is silently dropped on first launch until approved with **`coi trust`** (run once in the repo dir). Re-approve whenever those mounts' host/container/`readonly` change. So the **first `make coi` boots without them until you `coi trust`**. See §2.4.
+- **Out-of-workspace mounts are trust-gated (0.9)** — including both `~/.claude` entries above. They are dropped with a `WARNING: ignoring untrusted mount` until approved with `coi trust` in the repo dir, which makes `coi trust` a **required** onboarding step. See §2.4.
 - Never mount `~/.ssh` or `$HOME`. See §5.
 
 ### 2.2 Wire Makefile targets
 
 Copy the snippet from `references/Makefile.snippet` into the project's Makefile under a dedicated `# ── Sandboxed Claude (COI) ─` section. It provides:
 
-- `make coi` — launches Claude in a sandbox with SSH-agent proxy attached.
+- `make coi` — launches Claude in a sandbox. (The SSH-agent proxy is coi's job, not the Makefile's — see §3.3.)
 - `make coi-resume` — resume the last session.
-- `make coi-debug` — bash shell, no Claude (for diagnosing the container itself).
+- `make coi-debug` — bash shell, no Claude (for diagnosing the container itself). Starts a **new** `coi shell --debug` session.
+- `make coi-bash` — interactive bash **inside the container that is already running**, via `incus exec … runuser -u code`. Use this to inspect or work alongside a live sandbox; `coi-debug` can't, because it launches a separate session.
+- `make coi-bash-claude` — Claude in the already-running container **without tmux**, so scrollback is your terminal's native buffer instead of tmux copy-mode. Extra flags via `ARGS=…`.
 - `make coi-containers` — list only this project's containers (workspace-scoped).
-- `make coi-ssh-fix` — idempotent re-attach of the SSH-agent proxy device. **Run this whenever `ssh-add -l` fails inside the container.**
+- `make coi-ssh-fix` — **repair only.** Idempotent re-attach of the SSH-agent proxy device *at coi's own path*, for when the host agent was restarted mid-session. It is not part of startup. See §3.3.
 - `make coi-docker-fix` — fix `/var/run/docker.sock` perms inside the container.
 - `make coi-git-fix` — bind-mount the main worktree's `.git/` into the container so `git` resolves worktree paths. No-op in the main worktree; idempotent re-attach in a child worktree. See §3.10.
 - `make coi-hosts` — write the running container's IP into `/etc/hosts` for `*.<project>.test`-style local domains (adapt `COI_LOCAL_DOMAIN` per project). Slug-aware (see §3.10): tags each line with a `# coi-hosts:<slug>` sentinel so multiple worktrees coexist safely.
@@ -174,7 +215,9 @@ Copy the snippet from `references/Makefile.snippet` into the project's Makefile 
 - `make coi-clean` — stop & delete **only this project's** COI container(s); never touches other projects.
 - `make coi-update` — `coi build` with a clear message, for cadence-based image refreshes. After this completes, run `make coi-self-bootstrap` from inside the new container (see §3.9).
 
-The snippet is parameterised via `$(USER)` and has no project-specific names baked in. One var worth explaining: `COI_SSH_SOCK` (host agent path, defaults to `/tmp/ssh-agent-$(USER).sock`). Bind mounts are not defined in the Makefile — they live in `[[mounts.default]]` in `.coi/config.toml` (see §2.1). Never add `~/.ssh` or `$HOME` to either the mounts or the Makefile.
+The snippet is parameterised via `$(USER)` and has no project-specific names baked in. Two vars worth explaining: `COI_SSH_SOCK` (host agent path, defaults to `/tmp/ssh-agent-$(USER).sock`, used only as a precondition check and by the repair target) and `COI_SSH_SOCK_CONTAINER` (`/tmp/ssh-agent.sock` — **coi's** path, not one the Makefile chooses). Bind mounts are not defined in the Makefile — they live in `[[mounts.default]]` in `.coi/config.toml` (see §2.1). Never add `~/.ssh` or `$HOME` to either the mounts or the Makefile.
+
+**Do not reintroduce startup-time SSH-agent churn.** The background helper is `_coi-post-start`; it fixes `docker.sock` perms, pushes `settings.json`, and (in a child worktree) attaches the main `.git`. An earlier revision of this snippet also removed and re-created coi's `ssh-agent` device on a different socket path at every launch — that broke agent forwarding outright (§3.3). If you are copying an older project Makefile forward, rename `_coi-ssh-watcher` → `_coi-post-start` and delete the two `ssh-agent` device lines.
 
 **Multi-project isolation invariant — don't break it.** One host's Incus daemon is shared by every project the user runs through COI. Containers from different projects only differ in the 8-hex suffix of their name (`coi-<workspace-hash>-<slot>`), so a naive `grep '^coi-'` filter matches **everyone's** containers — running `make coi-clean` with that pattern will delete another project's in-flight work. The snippet enforces workspace scoping via a single helper:
 
@@ -254,8 +297,8 @@ If the project declares a lower bound (e.g. `"php": ">=8.2"`), prefer the **newe
 0.9 treats a repo-committed `.coi/config.toml` as **untrusted** — a cloned repo could otherwise
 mount your home directory or open the network on you. Two classes of setting are gated:
 
-1. **Out-of-workspace bind mounts.** Any `[[mounts.default]]` whose host path resolves outside
-   `/workspace` is **ignored at launch** until you approve it:
+1. **Out-of-workspace bind mounts and forwarded sockets.** Any `[[mounts.default]]` whose host path
+   resolves outside `/workspace` is **ignored at launch** until you approve it:
 
    ```bash
    coi trust            # run in the repo dir — approves this project's out-of-workspace mounts
@@ -265,11 +308,12 @@ mount your home directory or open the network on you. Two classes of setting are
 
    Approval is **pinned to a fingerprint of the approved mounts** — changing a mount's host path,
    container path, or `readonly` flag requires re-approval; changing unrelated settings (base image,
-   network mode) does not. In-workspace mounts and mounts from the trusted `~/.coi/config.toml` /
-   `$COI_CONFIG` are never gated.
+   network mode) does not. In-workspace mounts, and mounts from the trusted `~/.coi/config.toml` /
+   `$COI_CONFIG`, are never gated.
    - **Onboarding consequence:** the standard `~/.claude/projects` + `~/.claude/skills` mounts are
      out-of-workspace, so the **first `make coi` boots without them until `coi trust`**. The full
-     onboarding sequence is: write config → `coi trust` → `make coi`.
+     onboarding sequence is: write config → `coi trust` → `make coi`. Don't try to dodge this by
+     deleting the mounts — coi's built-in profile lists them but does not actually attach them (§2.1).
 
 2. **Security-downgrading settings.** `[network] mode = "open"` in the *project* file is ignored
    with `WARNING: ignoring security-downgrading "network.mode=open" …`; it only applies from the
@@ -281,29 +325,50 @@ untrusted repo's own `.coi/config.toml`.
 
 ### 2.5 `.gitignore` & secrets
 
-`.coi/config.toml` is safe to commit — it contains no secrets. But verify with the user before committing: some projects override `[environment]` with real values.
+`.coi/config.toml` is safe to commit — it contains no secrets. But verify with the user before committing: some projects put real values in `[defaults.environment]`.
 
 ### 2.6 Default Claude Code settings for every container
 
 Each container boots a **fresh** `/home/code/.claude` — the host's
 `~/.claude/settings.json` is not mounted in, and `coi shell` can't pass extra
 CLI args to `claude`. To make every container start Claude with chosen defaults
-(reasoning effort, `ultracode`, model, `includeCoAuthoredBy: false`, …) there are
-two channels: **env vars** in the trusted `~/.coi/config.toml` `[environment]`
-(host-wide, applied at container creation) and a **pushed `settings.json`** (the
-`_coi-ssh-watcher` target copies `~/.claude/coi-settings.json` → the container on
-every `make coi`). Keep a **dedicated `~/.claude/coi-settings.json`** rather than
-pushing your host settings.json, so sandbox-only keys (like `ultracode: true`)
-don't leak into your host sessions and host-UI cruft (figma/voice/tui) doesn't
-leak into the sandbox.
+(reasoning effort, `ultracode`, `includeCoAuthoredBy: false`, …) there are two
+channels: **env vars** in the trusted `~/.coi/config.toml` under
+**`[defaults.environment]`** (host-wide, applied at container creation — note the
+table name, a top-level `[environment]` there is silently ignored, §2.1) and a
+**pushed `settings.json`** (the `_coi-post-start` target copies
+`~/.claude/coi-settings.json` → the container on every `make coi`). Keep a
+**dedicated `~/.claude/coi-settings.json`** rather than pushing your host
+settings.json, so sandbox-only keys (like `ultracode: true`) don't leak into your
+host sessions and host-UI cruft (figma/voice/tui) doesn't leak into the sandbox.
 
 Key gotchas: `ultracode` is a real settings.json **boolean** (persistable, not
-CLI-only); `effortLevel` enum tops out at `xhigh`; **coi has no classifier "auto"
-permission mode** (only `bypass`/`interactive` — `bypass` is the right choice
-inside the sandbox); and **`model` must be set in `~/.coi/config.toml`** (coi
-manages `--model` and its default profile pins `claude-sonnet-4-5`). Full recipe,
-verified key/flag/env names, and the rollout/verification steps are in
-`references/claude-settings.md`.
+CLI-only); `effortLevel` enum tops out at `xhigh`; and **coi has no classifier
+"auto" permission mode** (only `bypass`/`interactive` — `bypass` is the right
+choice inside the sandbox). **Model selection is the least settled part** — the
+built-in profile pins `claude-sonnet-4-5`, yet a live 0.9.0 container's `claude`
+process carries no `--model` flag and no model env var, so verify before relying
+on either channel. Full recipe, verified key/flag/env names, and the
+rollout/verification steps are in `references/claude-settings.md`.
+
+### 2.7 Verifying a config actually applied
+
+`coi health` proves *discovery* (`Config loaded`, `Network mode`) but not that
+individual keys landed — and the failure mode that matters here is **silent**: a
+key in a table coi doesn't read produces no error. Check empirically with a
+throwaway container from a scratch workspace:
+
+```bash
+mkdir -p /tmp/coi-check/.coi && cp <project>/.coi/config.toml /tmp/coi-check/.coi/
+coi run -w /tmp/coi-check -- bash -lc 'echo "SSH=[$SSH_AUTH_SOCK]"; printenv MY_FLAG; mountpoint /home/code/.claude/skills'
+```
+
+Expect `SSH=[/tmp/ssh-agent.sock]`. An empty value for something you set means
+wrong table (§2.1). Two cleanup notes: `coi run` inherits `[container]
+persistent`, so it leaves a **stopped** container behind — delete it by name
+(`incus delete <name> --force`), never with a global `coi clean`, which sweeps
+other projects' orphans. And `coi run` needs `--` before the command, otherwise
+flags like `bash -c` are parsed by coi itself.
 
 ---
 
@@ -331,17 +396,28 @@ Different projects are isolated automatically by workspace (`-w` / `--workspace`
 
 ### 3.3 SSH agent lifecycle
 
-If `ssh-add -l` fails inside the container, the proxy device either never attached (timing race on startup) or got disconnected (agent restarted on host). Fix in order:
+**Forwarding is native in 0.9 — leave it alone.** With `[ssh] forward_agent = true`, coi does the whole job at container start:
 
-1. From host: `ssh-add -l` — confirm the agent is live and has keys.
-2. From host: `make coi-ssh-fix` — idempotent re-attach.
-3. From inside container: `export SSH_AUTH_SOCK=/tmp/ssh-auth.sock && ssh-add -l`.
-
-Put the export into the container user's `~/.bashrc` (survives `--persistent` mode) so it's automatic:
-
-```bash
-echo 'export SSH_AUTH_SOCK=/tmp/ssh-auth.sock' >> ~/.bashrc
 ```
+Forwarding socket: /tmp/ssh-agent-<user>.sock -> /tmp/ssh-agent.sock
+Device ssh-agent added to coi-xxxxxxxx-1
+```
+
+It attaches the proxy device (`connect=unix:<host agent>`, `listen=unix:/tmp/ssh-agent.sock`, `bind=container`, `uid=1000 gid=1000 mode=0600`) **and** exports `SSH_AUTH_SOCK=/tmp/ssh-agent.sock` inside the container. Nothing else is required — `ssh-add -l` lists the host's keys on first launch.
+
+> **Do not "help" it.** Pre-0.9 guidance (including earlier versions of this skill) had the Makefile tear the device down at startup and re-create it at `/tmp/ssh-auth.sock`, with a config entry meant to repoint `SSH_AUTH_SOCK` to match. Both variants of that config entry fail, in different ways:
+>
+> - **Top-level `[environment]`** (what this skill's old template used) sits in a table coi doesn't read (§2.1). The variable keeps coi's value or none at all, so the re-created socket is one **no process knows about** — `ssh-add -l` → `Could not open a connection to your authentication agent`.
+> - **`[defaults.environment]`** *is* read, and that's worse: it genuinely overrides coi's exported value. Verified on 0.9.0 — with `forward_agent = true` and `SSH_AUTH_SOCK = "/tmp/ssh-auth.sock"` in `[defaults.environment]`, coi still creates its socket at `/tmp/ssh-agent.sock`, the variable points at the other path, and `ssh-add` fails. The pair only works while the Makefile half also runs and wins its startup race; remove or mis-time either half and forwarding silently dies.
+>
+> Either way the fix is the same: delete both halves and let coi own it. If you inherit a Makefile that does this, strip it (§2.2) — don't paper over it with a `~/.bashrc` export.
+
+If `ssh-add -l` does fail inside the container, work through:
+
+1. **Host:** `ssh-add -l` — the agent must be live and hold keys. Restarting it on the host orphans the container-side proxy.
+2. **Host:** `incus config device show <container> | grep -A6 '^ssh-agent:'` — confirm `listen: unix:/tmp/ssh-agent.sock`. A different `listen` path means something re-created the device; find and remove that code.
+3. **Container:** `echo $SSH_AUTH_SOCK` — should be `/tmp/ssh-agent.sock`. Empty means coi's env injection didn't happen (usually `forward_agent` missing/false, or the whole config failed to load — check `coi health` → `Config loaded`).
+4. **Host:** `make coi-ssh-fix` — re-attaches the device at coi's path. Repair only; it is not part of startup.
 
 ### 3.4 X11 clipboard, image paste & microphone (optional)
 
@@ -408,7 +484,7 @@ See `references/troubleshooting.md` §8 for the full schema, mitigation order, a
 Claude Code is baked into the `coi-default` image at `coi build` time via `claude.ai/install.sh`. Running containers are frozen at whatever Claude version was current when the image was built.
 
 - **Ephemeral containers** (default): `make coi-update` rebuilds the image — next `coi shell` gets the new Claude. 5–10 min.
-- **Persistent slots** (`[defaults] persistent = true`): run `claude update` inside the container; the upgrade sticks because the container state survives.
+- **Persistent slots** (`[container] persistent = true`): run `claude update` inside the container; the upgrade sticks because the container state survives.
 - **Don't** `npm install -g @anthropic-ai/claude-code@latest` inside the container — installs a parallel copy that fights the native install on `$PATH`.
 - **The `coi` binary itself:** `coi update` (0.9) updates coi and its threat-detection databases — distinct from `coi build`, which rebuilds the container *image*. Re-running the upstream install script also upgrades the binary.
 
@@ -534,7 +610,7 @@ coi-git-fix:
 		source=$$MAIN_GIT path=$$MAIN_GIT shift=true
 ```
 
-The `_coi-ssh-watcher` recipe applies this automatically when `make coi` runs from a non-main worktree, so the standalone target only matters when re-attaching after `coi-clean` / container recreation.
+The `_coi-post-start` recipe applies this automatically when `make coi` runs from a non-main worktree, so the standalone target only matters when re-attaching after `coi-clean` / container recreation.
 
 **Known limitation: hardcoded Traefik Host rules.** If a project's local compose hardcodes `Host(\`<project>.test\`)` rather than templating from a var, slug-prefixed `/etc/hosts` entries resolve to the right container but Traefik inside that container won't route them. Either template those rules or accept that "two stacks serving HTTP at the local domain" is serialized until templating lands. Volume isolation and sandboxed Claude per worktree work regardless.
 
@@ -580,10 +656,10 @@ These MUST hold. If a setup step would violate one, refuse and surface the confl
 1. **Never mount `~/.ssh` into the container.** SSH access is agent-forwarded only. The agent proxy exposes the *ability to sign*, not the private key.
 2. **Never mount the full `$HOME`.** Mount specific subdirectories (`~/.claude/projects`, `~/.claude/skills`) explicitly.
 3. **Do not disable `[monitoring] enabled`** to make a smoke test pass. The threat detector auto-pauses containers on suspicious patterns — that's the feature, not the bug.
-4. **Do not commit `.coi/config.toml` to a public repo without reviewing `[environment]`** — it's a common place to accidentally paste secrets.
+4. **Do not commit `.coi/config.toml` to a public repo without reviewing `[defaults.environment]`** — it's a common place to accidentally paste secrets.
 5. **Ephemeral by default, persistent by choice.** Long-running persistent slots accumulate state (shell history, downloaded tools) that an attacker could probe. Prefer ephemeral unless the upgrade/time cost is meaningful.
 6. **Keep `coi` and the image current.** `coi update` refreshes the binary + threat databases; `coi build` rebuilds the image. Weekly is reasonable — old base images accumulate CVEs.
-7. **Don't remove or override the `protect-git-config` / `protect-git-hooks` devices.** COI adds these read-only bind mounts over `/workspace/.git/config` and `/workspace/.git/hooks/` automatically — visible in `incus config device show <container>`. They block the classic git-hook escape vector: an agent writes `[core] hooksPath = /tmp/evil` into `.git/config` or drops a `post-commit` into `.git/hooks/`, and the next `git commit` **you** run on the host executes attacker-controlled code under your host identity, with your SSH agent and your shell. The mounts make those writes fail with `EROFS` while leaving the rest of `.git/` (refs, objects, index) writable so normal git operations inside the container still work. If you see a failing `git config --local` or a hook-install step that errors, that's the protection doing its job — don't "fix" it by removing the device. 0.9 also applies **host-side immutable protection** (`chattr +i`, visible via `lsattr`) to protected dirs (`.coi`, `.husky`, `.vscode`) **while a session/container is running**, so a host-side edit of `.coi/config.toml` mid-session can fail with `EPERM`. Same protection, not a bug — edit config when no session is running, or use the trusted `~/.coi/config.toml`.
+7. **Don't remove or override the `protect-git-config` / `protect-git-hooks` devices.** COI adds these read-only bind mounts over `/workspace/.git/config` and `/workspace/.git/hooks/` automatically — visible in `incus config device show <container>`. They block the classic git-hook escape vector: an agent writes `[core] hooksPath = /tmp/evil` into `.git/config` or drops a `post-commit` into `.git/hooks/`, and the next `git commit` **you** run on the host executes attacker-controlled code under your host identity, with your SSH agent and your shell. The mounts make those writes fail with `EROFS` while leaving the rest of `.git/` (refs, objects, index) writable so normal git operations inside the container still work. If you see a failing `git config --local` or a hook-install step that errors, that's the protection doing its job — don't "fix" it by removing the device. The full 0.9.0 set is wider than the two devices in this heading — a launch logs `Protected paths (mounted read-only): .git/hooks, .git/config, .git/config.worktree, .git/info/attributes, .husky, .vscode, .coi`. 0.9 also applies **host-side immutable protection** (`chattr +i`, visible via `lsattr -d`) to the protected dirs **while a session/container is running**, so a host-side edit of `.coi/config.toml` mid-session can fail with `EPERM`. Same protection, not a bug — edit config when no session is running, or use the trusted `~/.coi/config.toml`.
 8. **Don't blanket-set `COI_TRUST_ALL=1`.** It bypasses the 0.9 mount-trust gate that stops a cloned repo from mounting your home dir or opening the network. Approve per-project with `coi trust` on a host; reserve `COI_TRUST_ALL=1` for CI. (§2.4)
 
 ---

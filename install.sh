@@ -98,7 +98,7 @@ scaffold_project() {
   else
     mkdir -p "$dir/.coi"
     cp "$SCRIPT_DIR/references/config.toml.template" "$dir/.coi/config.toml"
-    ok "wrote $dir/.coi/config.toml (from template — review [[mounts.default]] and [network])"
+    ok "wrote $dir/.coi/config.toml (from template — review [[mounts.default]], [container] persistent, [network])"
   fi
 
   # coi.mk (Makefile targets as an includable fragment)
