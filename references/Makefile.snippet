@@ -43,9 +43,18 @@ COI_SSH_SOCK_CONTAINER := /tmp/ssh-agent.sock
 # render unprefixed. Non-empty in a sibling worktree → hostnames become
 # <slug>.<COI_LOCAL_DOMAIN> and /etc/hosts lines are tagged with a
 # sentinel so coi-hosts-clean removes only this worktree's entries.
+#
+# The sentinel MUST carry a project segment. /etc/hosts is host-global: every
+# project that copies this snippet runs `sed -i '/# <sentinel>$/d'` against the
+# same file, and a bare "coi-hosts:main" is identical in all of them — so
+# `make coi-hosts` in project B silently deletes project A's main-worktree line.
+# COI_HOSTS_PROJECT defaults to the first label of COI_LOCAL_DOMAIN (stable
+# across worktrees, unlike the directory name); set it explicitly if two
+# projects share a domain label.
 WORKTREE_SLUG := $(strip $(shell test -f .worktree-slug && cat .worktree-slug 2>/dev/null))
 WORKTREE_HOST_PREFIX := $(if $(WORKTREE_SLUG),$(WORKTREE_SLUG).,)
-COI_HOSTS_SENTINEL := coi-hosts:$(if $(WORKTREE_SLUG),$(WORKTREE_SLUG),main)
+COI_HOSTS_PROJECT ?= $(firstword $(subst ., ,$(COI_LOCAL_DOMAIN)))
+COI_HOSTS_SENTINEL := coi-hosts:$(COI_HOSTS_PROJECT):$(if $(WORKTREE_SLUG),$(WORKTREE_SLUG),main)
 
 # Print the running container name(s) bound to this project's workspace.
 # One name per line; empty output means "no container for this project".

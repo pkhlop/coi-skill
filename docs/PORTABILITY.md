@@ -31,6 +31,7 @@ Legend: **Generic** = works everywhere unchanged · **Host** = varies per machin
 | Container env vars | Project | `.coi/config.toml` `[defaults.environment]` | none | top-level `[environment]` is silently ignored |
 | **Local dev domain** | **Project** | `coi.mk` `COI_LOCAL_DOMAIN` | `<dirname>.test` | set per repo |
 | `/etc/hosts` hostnames (`api.`/`admin.`) | Project | `coi.mk` `coi-hosts` target | `api.`/`admin.` prefixes | edit the `HOSTS=` line |
+| `/etc/hosts` sentinel project segment | Project | `coi.mk` `COI_HOSTS_PROJECT` | first label of `COI_LOCAL_DOMAIN` | set explicitly if two projects share a label |
 | Worktree namespacing | Project | `.worktree-slug` file + `coi.mk` | empty (main worktree) | one-line slug file |
 | `COMPOSE_PROJECT_NAME` | Project | project Makefile | `<project>-<slug>` | project-owned |
 | Language runtimes + versions | Project | project-owned `coi-project-setup` | none (not in skill) | detect from repo (SKILL §2.3) |

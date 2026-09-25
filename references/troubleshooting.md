@@ -571,3 +571,27 @@ DNS and HTTP working` is proof the fix took, without launching an interactive ag
 0.9 also `chattr +i`s protected dirs (`.coi`, `.husky`, `.vscode`) **while a container runs**, so a
 host-side edit of `.coi/config.toml` mid-session fails with `EPERM`. Edit when no session is running,
 or use the trusted `~/.coi/config.toml`. (`lsattr` shows the `i` flag only during an active session.)
+
+## 11. Local `*.test` domain stopped resolving (stack is healthy)
+
+### 11.1 Symptom
+`http://<project>.test` fails with a DNS error (`getent hosts <project>.test` prints nothing), yet the
+container is running and Traefik answers when you bypass DNS:
+
+```bash
+IP=$(coi list --format json | jq -r --arg ws "$PWD" '.active_containers[] | select(.workspace==$ws) | .ipv4')
+curl -s -o /dev/null -w '%{http_code}\n' --resolve <project>.test:80:$IP http://<project>.test/   # 200 = stack fine
+grep -n 'coi-hosts' /etc/hosts
+```
+
+### 11.2 Causes
+- **Sentinel collision between projects.** Another project's `make coi-hosts` deleted your line because
+  both used the same tag (e.g. `# coi-hosts:main`) — you'll see *its* hostnames under *your* tag. Fix the
+  Makefile to the project-scoped sentinel (`coi-hosts:<project>:<slug>`, §3.10 / `Makefile.snippet`),
+  then `make coi-hosts`.
+- **Stale IP.** The container was recreated or another container took the old DHCP lease — the line
+  exists but points at an IP now owned by a different project's container. Re-run `make coi-hosts`.
+  Check sibling worktree lines too; they go stale the same way.
+
+`make coi-hosts` needs sudo, so run it from a real terminal (in Claude Code: `! make coi-hosts`).
+

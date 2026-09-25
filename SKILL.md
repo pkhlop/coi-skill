@@ -207,7 +207,7 @@ Copy the snippet from `references/Makefile.snippet` into the project's Makefile 
 - `make coi-ssh-fix` — **repair only.** Idempotent re-attach of the SSH-agent proxy device *at coi's own path*, for when the host agent was restarted mid-session. It is not part of startup. See §3.3.
 - `make coi-docker-fix` — fix `/var/run/docker.sock` perms inside the container.
 - `make coi-git-fix` — bind-mount the main worktree's `.git/` into the container so `git` resolves worktree paths. No-op in the main worktree; idempotent re-attach in a child worktree. See §3.10.
-- `make coi-hosts` — write the running container's IP into `/etc/hosts` for `*.<project>.test`-style local domains (adapt `COI_LOCAL_DOMAIN` per project). Slug-aware (see §3.10): tags each line with a `# coi-hosts:<slug>` sentinel so multiple worktrees coexist safely.
+- `make coi-hosts` — write the running container's IP into `/etc/hosts` for `*.<project>.test`-style local domains (adapt `COI_LOCAL_DOMAIN` per project). Slug-aware (see §3.10): tags each line with a `# coi-hosts:<project>:<slug>` sentinel so multiple worktrees — and multiple projects — coexist safely.
 - `make coi-hosts-clean` — remove only this worktree's `/etc/hosts` lines (matched by sentinel tag). Idempotent; safe to run when nothing is registered.
 - `make coi-x11` — attach X11 clipboard + PulseAudio (microphone) to the running container. Enables Ctrl+V image paste and `/voice` dictation. **Run before `make coi`**, or restart Claude after.
 - `make coi-extras` — install **generic, project-agnostic** terminal/navigation tools (mc, htop, rsync, pv, bash-completion, aria2, unzip, fzf-make) + apply the IPv4 gai.conf fix for the Incus bridge. Language runtimes (PHP, Node, Go, Python, Ruby) and project-scope tools (Playwright, AWS CLI, DB clients) are **not** installed here — they live in project-owned targets (see §2.3).
@@ -569,7 +569,8 @@ Read it in the Makefile once, then propagate to the four places that would other
 ```make
 WORKTREE_SLUG := $(strip $(shell test -f .worktree-slug && cat .worktree-slug 2>/dev/null))
 WORKTREE_HOST_PREFIX := $(if $(WORKTREE_SLUG),$(WORKTREE_SLUG).,)
-COI_HOSTS_SENTINEL := coi-hosts:$(if $(WORKTREE_SLUG),$(WORKTREE_SLUG),main)
+COI_HOSTS_PROJECT ?= $(firstword $(subst ., ,$(COI_LOCAL_DOMAIN)))
+COI_HOSTS_SENTINEL := coi-hosts:$(COI_HOSTS_PROJECT):$(if $(WORKTREE_SLUG),$(WORKTREE_SLUG),main)
 ifneq ($(WORKTREE_SLUG),)
 export COMPOSE_PROJECT_NAME := <project>-$(WORKTREE_SLUG)
 endif
@@ -579,7 +580,7 @@ endif
 |---|---|
 | `COMPOSE_PROJECT_NAME` | Docker namespaces containers, networks, **and named volumes** by project name. A non-empty slug → each worktree's stack gets its own `postgres_data` volume. |
 | `WORKTREE_HOST_PREFIX` in `/etc/hosts` lines | `<slug>.<project>.test`, `api.<slug>.<project>.test`, etc. — distinct entries per worktree, no clobbering. |
-| `COI_HOSTS_SENTINEL` trailing comment | `coi-hosts-clean` deletes by sentinel, not by hostname regex. Safe regardless of how many worktrees share `/etc/hosts`. |
+| `COI_HOSTS_SENTINEL` trailing comment | `coi-hosts-clean` deletes by sentinel, not by hostname regex. Safe regardless of how many worktrees share `/etc/hosts`. The `<project>` segment keeps it safe across projects too. |
 | Worktree directory name (by convention) | `../<project>-<slug>` keeps `git worktree list` legible. |
 
 **Don't bake hostname-pattern deletion into `coi-hosts`.** The old shape (`sed -i '/\.<project>\.test/d' /etc/hosts`) wipes every sibling worktree's lines too. Use a sentinel:
@@ -593,6 +594,8 @@ coi-hosts:
 coi-hosts-clean:
 	@sudo sed -i '/# $(COI_HOSTS_SENTINEL)$$/d' /etc/hosts
 ```
+
+**The sentinel must be project-scoped, not just worktree-scoped.** `/etc/hosts` is shared by every project on the host, and every project that adopts this snippet deletes-then-appends by sentinel. With a bare `coi-hosts:main`, the main worktree of *every* project carries the same tag, so `make coi-hosts` in project B deletes project A's line; A's local domain stops resolving while its container and Traefik stay perfectly healthy (see `references/troubleshooting.md` §11). Hence `coi-hosts:<project>:<slug>`. Changing the format orphans lines written under the old tag — remove those once by hand.
 
 **Volume-vs-secret tradeoff.** Worktrees almost always want **isolated volumes** (so a destructive migration on one branch doesn't trash another's data) but **shared secrets** (one rotation should flow everywhere). The pattern: copy generated env files into the new worktree but **symlink** the canonical `.setup-state/` (or equivalent secret store) back to the main worktree. `worktree-add` does this; `worktree-remove` never deletes through the symlink because `git worktree remove` operates on the worktree dir, not the symlink target.
 
