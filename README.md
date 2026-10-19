@@ -1,7 +1,7 @@
 # coi-skill
 
 A **[Claude Code](https://claude.com/claude-code) Skill** for running coding agents inside
-[code-on-incus](https://github.com/mensfeld/code-on-incus) (COI) — Incus system-container
+[Coi / code-on-incus](https://github.com/coipond/coi) (COI) — Incus system-container
 sandboxes that let an agent work autonomously (`--dangerously-skip-permissions`) without
 putting the host at risk.
 
@@ -44,7 +44,7 @@ you get is Linux either way. See `docs/HOST_SETUP.md`.
 ### 1. Prerequisites (one-time per host)
 
 - **Incus ≥ 6.1**, initialized (`sudo incus admin init --minimal`)
-- The **`coi` binary** (`curl -fsSL https://raw.githubusercontent.com/mensfeld/code-on-incus/master/install.sh | bash`)
+- The **`coi` binary** (`curl -fsSL https://raw.githubusercontent.com/coipond/coi/master/install.sh | bash`)
 - **`jq`** on the host, and a running **SSH agent**
 
 Run the built-in check:
@@ -94,13 +94,14 @@ shows where it lives and how to override it. The short version:
   `coi trust` for the `~/.claude` mounts + `COI_LOCAL_DOMAIN`, language-runtime versions
 - **Per OS:** Incus install method + a couple of container tweaks (all documented, mostly automatic)
 
-> **Version note:** this skill is verified against **`coi 0.9.x`**. COI has made breaking changes
-> across versions (config-file location, the trust model, removed flags), so after any `coi` upgrade
-> run `coi health` and re-check the config/trust/network sections — `SKILL.md` opens with a
-> compatibility callout describing exactly what to re-verify.
+> **Version note:** this skill is verified against **`coi 0.15.0`** (upgraded from 0.9.x). COI has made
+> breaking changes across versions (config-file location, the trust model, removed flags, moved
+> keys), so after any `coi` upgrade run `coi health`, re-run `coi trust` in each project, and re-check
+> the config/trust/network sections — `SKILL.md` opens with a compatibility callout describing
+> exactly what to re-verify, and §3.12 is the upgrade runbook.
 
 ## Credits & license
 
-- Built on **[code-on-incus](https://github.com/mensfeld/code-on-incus)** by Michał Mensfeld — the
+- Built on **[Coi / code-on-incus](https://github.com/coipond/coi)** by Michał Mensfeld — the
   sandbox engine this skill drives. Install and license terms are upstream's.
 - This skill/playbook: MIT (see `LICENSE`).

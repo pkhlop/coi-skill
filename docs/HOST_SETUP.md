@@ -76,7 +76,7 @@ Skipping `admin init` makes every `coi build` fail with `No root device could be
 ## 3. Install the `coi` binary
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mensfeld/code-on-incus/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/coipond/coi/master/install.sh | bash
 ```
 
 Review the installer before piping to `bash`. It installs to `/usr/local/bin` (may prompt for

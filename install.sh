@@ -61,7 +61,7 @@ check_prereqs() {
   if command -v coi >/dev/null 2>&1; then
     ok "coi binary present ($(coi version 2>/dev/null | head -1 || echo '?'))"
   else
-    fail "coi binary not found — curl -fsSL https://raw.githubusercontent.com/mensfeld/code-on-incus/master/install.sh | bash"; missing=1
+    fail "coi binary not found — curl -fsSL https://raw.githubusercontent.com/coipond/coi/master/install.sh | bash"; missing=1
   fi
 
   if command -v jq >/dev/null 2>&1; then ok "jq present"
