@@ -3,7 +3,8 @@
 How to make **every** COI container start Claude Code with a chosen set of
 runtime settings (reasoning effort, ultracode, model, commit attribution, …).
 
-> **Version note.** Facts below were verified against **coi 0.9.0** and the
+> **Version note.** Facts below were verified against **coi 0.9.0** (model and
+> attribution re-checked against the **0.15.0** source) and the
 > **Claude Code 2.1.x** native binary (grepping the installed bundle + coi's
 > embedded launcher). Claude Code setting keys and coi's config surface both
 > drift across versions — re-verify (`claude --help`, grep the bundle,
@@ -47,8 +48,8 @@ the sandbox-appropriate keys, and have the Makefile push **that**:
 {
   "effortLevel": "xhigh",              // reasoning effort; enum low|medium|high|xhigh
   "ultracode": true,                   // multi-agent-orchestration standing mode (boolean key)
-  "model": "opus",                     // belt-and-suspenders; also set in ~/.coi (see Model below)
-  "includeCoAuthoredBy": false,        // no "Co-Authored-By: Claude" trailer on in-container commits
+  "model": "opus",                     // ANTHROPIC_MODEL from [tool.claude] model wins over this (see Model below)
+  "includeCoAuthoredBy": false,        // redundant on coi >= 0.15 (set in managed settings), harmless
   "skipDangerousModePermissionPrompt": true,  // belt-and-suspenders; coi already seeds bypass acceptance
   "cleanupPeriodDays": 365             // keep transcript history (default 30)
 }
@@ -72,7 +73,8 @@ can still edit its own settings.json inside the container.
 settings here — under `[defaults.environment]`, **not** `[environment]`:
 
 ```toml
-model = "opus"                 # see the model caveat below — verify before relying on this
+[tool.claude]
+model = "opus"                 # coi >= 0.11: delivered as ANTHROPIC_MODEL; a root-level `model` is ignored
 
 [network]
 mode = "open"
@@ -93,23 +95,21 @@ DISABLE_TELEMETRY = "1"        # opt every container out of telemetry + feature-
   values). There is also an env form, **`CLAUDE_CODE_EFFORT_LEVEL`**, which
   *overrides* settings.json and prints a "overrides this session" notice — prefer
   the settings.json key to avoid the notice.
-- **Model: UNRESOLVED on 0.9.0 — verify before relying on either channel.** The
-  built-in profile does declare a model (`coi profile info default` →
-  `model = "claude-sonnet-4-5"`), which is why earlier revisions of this file said
-  "coi manages `--model` itself" and told you to set `model` in `~/.coi/config.toml`.
-  That claim does not survive inspection: on a live 0.9.0 container the launched
-  process is
-  ```
-  claude --dangerously-skip-permissions --enable-auto-mode
-  ```
-  — **no `--model` flag**, and no model-related variable in its environment. So the
-  profile's model is not reaching the CLI by either route observed here. Until this
-  is pinned down, treat `model` in `coi-settings.json` as the channel most likely to
-  work (it is read by Claude Code directly), keep `model` in `~/.coi/config.toml` as
-  harmless belt-and-braces, and **check what actually launched**:
+- **Model: `[tool.claude] model` (coi ≥ 0.11).** On 0.9.0 a root-level `model` in
+  `~/.coi/config.toml` never reached the CLI — the launched process carried no
+  `--model` flag and no model variable. 0.11.0 moved the key to `[tool.claude] model`
+  and wired it: coi exports **`ANTHROPIC_MODEL`** into the Claude it launches via
+  `coi shell` (not into `coi run` commands). A root-level `model` is now silently
+  ignored. Source-verified on 0.15.0 (`internal/tool/tool.go`); confirm live with
+  `echo $ANTHROPIC_MODEL` in a `make coi` session, and check what actually launched:
   ```bash
   incus exec <container> -- bash -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null | grep -m1 "^claude "; done'
   ```
+- **Attribution is stripped by coi ≥ 0.15.** It writes `{"includeCoAuthoredBy": false}`
+  into the root-owned `/etc/claude-code/managed-settings.json` (highest-precedence
+  tier — no user/project setting overrides it) and installs a commit-message strip
+  hook. 0.9.0 wrote `{"disableAutoMode": "disable"}` there instead, sometimes as an
+  unreadable `root:root 0600` file — see troubleshooting §12.
 - **coi has no classifier "auto" permission mode.** `[tool] permission_mode`
   accepts only **`"bypass"`** (→ `--permission-mode bypassPermissions`) and
   **`"interactive"`** (prompts). Inside a COI sandbox `bypass` is the intended
@@ -130,14 +130,14 @@ DISABLE_TELEMETRY = "1"        # opt every container out of telemetry + feature-
 ## Rollout
 
 1. Write `~/.claude/coi-settings.json` (container-only keys).
-2. Add `model` + `[environment]` to `~/.coi/config.toml` (edit while no `make coi`
+2. Add `[tool.claude] model` + `[defaults.environment]` to `~/.coi/config.toml` (edit while no `make coi`
    is launching — coi may `chattr +i` workspace `.coi` dirs during a session; the
    host `~/.coi` is normally mutable, verify with `lsattr -d ~/.coi`).
 3. Ensure the Makefile push points at `coi-settings.json` (the snippet already
    does; existing project Makefiles copied from an older snippet need the one-line
    retarget above).
 4. **Recreate** running persistent containers to pick up creation-time env/model:
-   `cd <worktree> && make coi-clean && make coi`. settings.json-only changes land
+   `cd <worktree> && make coi-recreate`. settings.json-only changes land
    on the next `make coi` without a recreate (the watcher re-pushes).
 
 ## Verifying

@@ -35,6 +35,17 @@ COI_SSH_SOCK     ?= /tmp/ssh-agent-$(USER).sock
 COI_CLAUDE_HOME  := /home/code/.claude
 COI_LOCAL_DOMAIN ?= $(notdir $(CURDIR)).test
 
+# Launch slot, pinned so `make coi` reuses the persistent container that
+# `make coi-create` configured. coi's auto-allocation treats a stopped persistent
+# container as occupied and would boot a fresh slot without the GPU and host
+# integrations instead. Parallel session: make coi COI_SLOT=2 (no coi-create
+# setup; coi-gpu/coi-x11 target slot 1).
+COI_SLOT ?= 1
+
+# GPU passthrough at container creation: on when the host has NVIDIA's container
+# CLI (what incus nvidia.runtime needs). Force: COI_GPU=1, disable: COI_GPU=
+COI_GPU ?= $(if $(shell command -v nvidia-container-cli 2>/dev/null),1,)
+
 # Container-side agent socket. This is coi's own path — keep it in sync with
 # coi, never with a value invented here (see "SSH AGENT: HANDS OFF" above).
 COI_SSH_SOCK_CONTAINER := /tmp/ssh-agent.sock
@@ -61,23 +72,30 @@ COI_HOSTS_SENTINEL := coi-hosts:$(COI_HOSTS_PROJECT):$(if $(WORKTREE_SLUG),$(WOR
 COI_THIS_JQ := (.active_containers // [])[] | select(.workspace==$$ws and .status=="Running") | .name
 coi-this-container = coi list --format json 2>/dev/null | jq -r --arg ws '$(CURDIR)' '$(COI_THIS_JQ)'
 
-.PHONY: coi coi-resume coi-debug coi-bash coi-bash-claude coi-ssh-fix coi-docker-fix coi-git-fix coi-hosts coi-hosts-clean coi-clean coi-containers coi-update coi-extras coi-x11 coi-self-bootstrap _coi-post-start
+# Same, but any status (Stopped included) — for create/delete/configure targets.
+COI_ANY_JQ := (.active_containers // [])[] | select(.workspace==$$ws) | .name
+coi-any-container = coi list --format json 2>/dev/null | jq -r --arg ws '$(CURDIR)' '$(COI_ANY_JQ)'
+
+.PHONY: coi coi-resume coi-debug coi-bash coi-bash-claude coi-ssh-fix coi-docker-fix coi-git-fix coi-hosts coi-hosts-clean coi-clean coi-containers coi-update coi-extras coi-x11 coi-gpu coi-create coi-recreate coi-self-bootstrap _coi-ensure _coi-post-start
 
 coi: ## Launch Claude Code in a sandboxed Incus container
 	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
+	@$(MAKE) --no-print-directory _coi-ensure
 	@echo "==> Starting COI sandbox (post-start fixes apply in background)..."
 	@( $(MAKE) --no-print-directory _coi-post-start >/dev/null 2>&1 & )
-	@coi shell
+	@coi shell --slot $(COI_SLOT)
 
 coi-resume: ## Resume the most recent Claude Code COI session
 	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
+	@$(MAKE) --no-print-directory _coi-ensure
 	@( $(MAKE) --no-print-directory _coi-post-start >/dev/null 2>&1 & )
-	@coi shell --resume
+	@coi shell --slot $(COI_SLOT) --resume
 
 coi-debug: ## Launch bash in a sandboxed Incus container (no Claude)
 	@test -S "$(COI_SSH_SOCK)" || { echo "ERROR: SSH agent not running at $(COI_SSH_SOCK). Run: ssh-agent -a $(COI_SSH_SOCK) && ssh-add"; exit 1; }
+	@$(MAKE) --no-print-directory _coi-ensure
 	@( $(MAKE) --no-print-directory _coi-post-start >/dev/null 2>&1 & )
-	@coi shell --debug
+	@coi shell --slot $(COI_SLOT) --debug
 
 coi-containers: ## List COI containers bound to this project's workspace
 	@coi list --format json 2>/dev/null | jq -r --arg ws '$(CURDIR)' \
@@ -156,9 +174,9 @@ coi-hosts-clean: ## Remove THIS worktree's lines from /etc/hosts (matched by sen
 	fi
 
 coi-clean: ## Stop & delete THIS project's COI container(s) only (other projects untouched)
-	@CONTAINERS=$$($(coi-this-container)); \
+	@CONTAINERS=$$($(coi-any-container)); \
 	if [ -z "$$CONTAINERS" ]; then \
-		echo "==> No running COI container for this project ($(CURDIR)) — nothing to clean."; \
+		echo "==> No COI container for this project ($(CURDIR)) — nothing to clean."; \
 	else \
 		echo "==> Deleting containers bound to $(CURDIR):"; \
 		echo "$$CONTAINERS" | sed 's/^/    /'; \
@@ -236,6 +254,10 @@ coi-self-bootstrap: ## (RUN INSIDE container) Re-apply per-rebuild fixes (Playwr
 	fi
 	@$(COI_SELF_BOOTSTRAP_SCRIPT)
 
+# X0 is attached as a proxy, not a disk: a disk-mounted X0 shows up as
+# nobody:nogroup 0775 inside, so `code` can't connect. The proxy connects as
+# root host-side, which the `xhost +si:localuser:root` grant admits. Packages
+# need `apt-get update` first — a fresh container has empty apt lists.
 coi-x11: ## Attach X11 clipboard + PulseAudio microphone to running COI container
 	@CONTAINER=$$($(coi-this-container) | head -1); \
 	test -n "$$CONTAINER" || { echo "ERROR: no running COI container for this project ($(CURDIR))"; exit 1; }; \
@@ -243,7 +265,10 @@ coi-x11: ## Attach X11 clipboard + PulseAudio microphone to running COI containe
 	test -f "$$XAUTH_FILE" || { echo "ERROR: Xauthority file not found at $$XAUTH_FILE (check \$$XAUTHORITY)"; exit 1; }; \
 	echo "==> Attaching X11 display to $$CONTAINER (xauth=$$XAUTH_FILE)"; \
 	incus config device remove $$CONTAINER x11-socket 2>/dev/null || true; \
-	incus config device add $$CONTAINER x11-socket disk source=/tmp/.X11-unix/X0 path=/tmp/.X11-unix/X0; \
+	incus exec $$CONTAINER -- rm -f /tmp/.X11-unix/X0; \
+	incus config device add $$CONTAINER x11-socket proxy \
+		connect=unix:/tmp/.X11-unix/X0 listen=unix:/tmp/.X11-unix/X0 \
+		bind=container uid=1000 gid=1000 mode=0600 >/dev/null; \
 	incus config device remove $$CONTAINER xauth 2>/dev/null || true; \
 	incus file push $$XAUTH_FILE $$CONTAINER/home/code/.Xauthority --uid 1000 --gid 1000 --mode 0600; \
 	incus exec $$CONTAINER -- rm -f /home/code/.Xauthority-c /home/code/.Xauthority-l; \
@@ -252,7 +277,9 @@ coi-x11: ## Attach X11 clipboard + PulseAudio microphone to running COI containe
 	incus config device add $$CONTAINER pulse-audio disk \
 		source=/run/user/$$(id -u)/pulse/native path=/tmp/pulse-native; \
 	echo "==> Installing xclip + pulseaudio-utils + ALSA PulseAudio plugin"; \
-	incus exec $$CONTAINER -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xclip pulseaudio-utils libasound2-plugins' >/dev/null; \
+	incus exec $$CONTAINER -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
+		DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xclip pulseaudio-utils libasound2-plugins' >/dev/null \
+		|| { echo "ERROR: package install failed in $$CONTAINER"; exit 1; }; \
 	incus exec $$CONTAINER -- bash -c "printf '%s\n' \
 		'pcm.default pulse' 'ctl.default pulse' \
 		'pcm.pulse { type pulse }' 'ctl.pulse { type pulse }' \
@@ -266,6 +293,68 @@ coi-x11: ## Attach X11 clipboard + PulseAudio microphone to running COI containe
 		echo "[ -r /etc/profile.d/x11-audio.sh ] && . /etc/profile.d/x11-audio.sh" >> /etc/bash.bashrc'; \
 	xhost +si:localuser:root >/dev/null 2>&1 || true; \
 	echo "==> Done. Claude must be (re)started to pick up DISPLAY/PULSE_SERVER."
+
+# ── GPU passthrough ─────────────────────────────
+# coi (0.15) has no GPU config key, so the NVIDIA GPU is attached with plain
+# incus config on the container. Requires nvidia-container-cli on the host.
+# nvidia.runtime only takes effect at container start, so a running container is
+# restarted (ends the Claude session in it). The config lives on the container;
+# coi-create applies it before first boot. Matches Stopped containers too.
+coi-gpu: ## Attach host NVIDIA GPU to this project's COI container (restarts it if running)
+	@CONTAINER=$$($(coi-any-container) | head -1); \
+	test -n "$$CONTAINER" || { echo "ERROR: no COI container for this project ($(CURDIR)) — create one with 'make coi-create' first"; exit 1; }; \
+	CHANGED=; \
+	if [ "$$(incus config get $$CONTAINER nvidia.runtime)" != "true" ]; then \
+		incus config set $$CONTAINER nvidia.runtime=true; CHANGED=1; \
+	fi; \
+	if ! incus config device get $$CONTAINER gpu type >/dev/null 2>&1; then \
+		incus config device add $$CONTAINER gpu gpu gputype=physical >/dev/null; CHANGED=1; \
+	fi; \
+	if [ -z "$$CHANGED" ]; then echo "==> GPU already attached to $$CONTAINER"; exit 0; fi; \
+	if [ "$$(incus list $$CONTAINER -c s -f csv)" = "RUNNING" ]; then \
+		echo "==> Restarting $$CONTAINER to apply nvidia.runtime"; \
+		incus restart $$CONTAINER; \
+	fi; \
+	echo "==> GPU attached to $$CONTAINER. Verify inside: nvidia-smi"
+
+# ── Container creation ──────────────────────────
+# A new container gets the GPU before first boot, then is booted once to attach
+# the host integrations (X11 clipboard + mic, SSH agent) and stopped again, so
+# the next `make coi` starts it through coi as usual. Integration failures print
+# a warning and creation carries on — re-run the target by hand once fixed.
+# `make coi` / coi-resume / coi-debug call this automatically (via _coi-ensure)
+# when the project has no container yet.
+#
+# Keep every $(MAKE) call on a recipe line of its own: make runs any line that
+# contains $(MAKE) even under `make -n`, so a shared line would really start
+# and stop the container during a dry run.
+coi-create: ## Create slot $(COI_SLOT) with GPU, X11 clipboard/mic and SSH agent attached
+	@test -z "$$($(coi-any-container))" || { echo "ERROR: a COI container already exists for $(CURDIR) — use 'make coi-recreate'"; exit 1; }
+	@echo "==> Creating slot $(COI_SLOT) (stopped) so the GPU can be attached before first boot"
+	@OUT=$$(coi run --slot $(COI_SLOT) -w '$(CURDIR)' -- true 2>&1) || { echo "$$OUT"; echo "ERROR: container creation failed"; exit 1; }; \
+	printf '%s\n' "$$OUT" | grep -A4 '^WARNING' || true; \
+	printf '%s\n' "$$OUT" | grep -q 'ignoring untrusted mount' && \
+		echo "==> Mounts were skipped: run 'coi trust' here, then 'make coi-recreate'" || true
+	@$(if $(COI_GPU),$(MAKE) --no-print-directory coi-gpu,echo "==> Skipping GPU passthrough (COI_GPU empty: no nvidia-container-cli on host)")
+	@CONTAINER=$$($(coi-any-container) | head -1); \
+	echo "==> Booting $$CONTAINER once to attach host integrations"; \
+	incus start $$CONTAINER; \
+	for i in $$(seq 1 30); do incus list $$CONTAINER -c 4 -f csv | grep -q . && break; sleep 1; done
+	@$(MAKE) --no-print-directory coi-x11 \
+		|| echo "WARNING: coi-x11 failed (see above) — no clipboard/mic in the sandbox. Fix, then run 'make coi-x11' with the container running."
+	@$(MAKE) --no-print-directory coi-ssh-fix \
+		|| echo "WARNING: coi-ssh-fix failed (see above) — coi still forwards the agent itself at session start."
+	@incus stop $$($(coi-any-container) | head -1)
+	@echo "==> Ready. Start Claude with: make coi"
+
+coi-recreate: ## Delete this project's COI container(s) (any status), then coi-create
+	@$(coi-any-container) | xargs -r -I{} sh -c 'echo "==> Deleting {}"; incus delete {} --force'
+	@$(MAKE) --no-print-directory coi-create
+
+# Internal — creates the container (coi-create) when this project has none, so
+# a plain `make coi` after `make coi-clean` still gets the GPU and integrations.
+_coi-ensure:
+	@test -n "$$($(coi-any-container))" || $(MAKE) --no-print-directory coi-create
 
 # Internal — polls for this project's freshly-started container and applies the
 # post-start fixes coi does NOT do itself: docker.sock perms, the pushed

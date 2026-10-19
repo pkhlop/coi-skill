@@ -213,18 +213,42 @@ Claude Code's Ctrl+V image paste needs `xclip` and a reachable X11 display. `/vo
 
 ### 4.1 `make coi-x11` (recommended)
 
-The Makefile target `make coi-x11` sets up X11 clipboard + PulseAudio in one step. Run it on the host while a COI container is running, then (re)start Claude.
+The Makefile target `make coi-x11` sets up X11 clipboard + PulseAudio in one step. `make coi-create` runs it for every new container; by hand, run it on the host while a COI container is running, then (re)start Claude.
 
 What it does:
-1. Mounts the X11 socket (`/tmp/.X11-unix/X0`) as a disk device.
+1. Attaches the X11 socket (`/tmp/.X11-unix/X0`) as an Incus **proxy** device (`bind=container uid=1000 gid=1000 mode=0600`).
 2. **Copies** (not bind-mounts) the host `$XAUTHORITY` file into `/home/code/.Xauthority` via `incus file push --uid 1000 --gid 1000 --mode 0600`.
 3. Mounts the PulseAudio socket (`/run/user/<uid>/pulse/native`) as a disk device.
-4. Installs `xclip` + `pulseaudio-utils` + `libasound2-plugins` inside the container.
+4. Runs `apt-get update`, then installs `xclip` + `pulseaudio-utils` + `libasound2-plugins` inside the container (fails loudly).
 5. Writes `/etc/asound.conf` to route ALSA through PulseAudio (without this, Claude Code's audio library hits ALSA directly and fails with "Unknown PCM default" / "cannot find card '0'" errors).
 6. Writes `/etc/profile.d/x11-audio.sh` with `DISPLAY=:0`, `XAUTHORITY`, `PULSE_SERVER`.
 7. Sources the profile.d script from `/etc/bash.bashrc` (for non-login shells).
 8. Runs `xhost +si:localuser:root` on the host.
-9. Verifies clipboard round-trip and PulseAudio connectivity.
+
+Verify by hand (host → container, container → host, image, mic):
+
+```bash
+echo host-clip | xclip -selection clipboard
+incus exec <ctr> -- su - code -c 'xclip -selection clipboard -o; echo back | xclip -selection clipboard -i'
+xclip -selection clipboard -o                                    # -> back
+xclip -selection clipboard -t image/png -i < some.png
+incus exec <ctr> -- su - code -c 'xclip -selection clipboard -t TARGETS -o'   # lists image/png
+incus exec <ctr> -- su - code -c 'timeout 3 parec --channels=1 --format=s16le --rate=16000 | wc -c'  # ~96000
+```
+
+Use `parec | wc -c` for the mic check, not `timeout … parecord file.wav` — `parecord` killed by
+`timeout` can leave a 44-byte header-only file even when capture works.
+
+**Gotcha — `Can't open display: :0` with a valid cookie.** The old recipe disk-mounted X0. Inside the
+container the socket then shows as `nobody:nogroup srwxrwxr-x`: `code` is "other" and has no write
+bit, and connecting to a Unix socket needs write. `xauth list` looks fine (the `#ffff##:0` wildcard
+cookie is hostname-independent), which sends you hunting in the wrong place. Fix: proxy device, as
+step 1. PulseAudio's socket is `0666`, which is why the same disk mount works for audio.
+
+**Gotcha — tools "not installed" after a fresh container.** Sockets attached, `/etc/asound.conf`
+written, but `xclip`/`pactl` missing: a new container has empty apt lists (`/var/lib/apt/lists`
+holds only `partial/`), so `apt-get install` without a prior `apt-get update` fails — silently, when
+its output goes to `/dev/null`. Step 4 now updates first and errors out on failure.
 
 **Gotcha — Xauthority must be copied, not bind-mounted.** Incus disk devices map file ownership to `nobody:nogroup` inside the container (UID mapping). The container user `code` (uid 1000) can't read it, so X11 auth fails silently. Use `incus file push` with `--uid 1000 --gid 1000` instead.
 
@@ -259,7 +283,7 @@ Add `tmp/` to `.gitignore`. Inside Claude: `look at ./tmp/paste-<ts>.png`.
 
 ### 4.3 Wayland note
 
-On Plasma 6 Wayland: pass the Xwayland socket (`/tmp/.X11-unix/X0`), not the native Wayland one — Wayland passthrough has a known bug with `xwayland-satellite` (lxc/incus#1635).
+On Plasma 6 Wayland: pass the Xwayland socket (`/tmp/.X11-unix/X0`), not the native Wayland one — Wayland passthrough has a known bug with `xwayland-satellite` (lxc/incus#1635). Verified working on Ubuntu 26.04 KDE Wayland: KWin syncs the Wayland and X11 clipboards, so text and images copied in native Wayland apps reach the container through Xwayland. `$XAUTHORITY` there is `/run/user/<uid>/xauth_XXXXXX` (KWin's), and audio goes through PipeWire's pulse server at the usual `/run/user/<uid>/pulse/native`.
 
 **Tradeoff:** X11 + PulseAudio forwarding gives the container full clipboard + keylog reach + microphone access on the host. Fine for own-code sandbox; weakens isolation for untrusted workloads.
 
@@ -346,8 +370,10 @@ sed -i 's|http://archive.ubuntu.com/|http://us.archive.ubuntu.com/|g' /etc/apt/s
 
 ## 7. Upgrading
 
-- `coi update` (0.9) — updates the `coi` binary + threat-detection databases. Re-running the
-  upstream install script also upgrades the binary.
+- `coi update` — updates the `coi` binary + threat-detection databases. **Broken on ≤ 0.11.0**
+  (reports "already on the latest version" because it reads its own version as `vv0.9.0`) — install
+  the release binary by hand; full runbook in SKILL.md §3.12. Reinstalling drops the binary's
+  `cap_linux_immutable` capability: re-run `sudo setcap cap_linux_immutable=ep /usr/local/bin/coi`.
 - `make coi-update` (alias for `coi build`) — refreshes the container *image*, next `coi shell` gets
   the new Claude.
 - `claude update` — only persists in `--persistent` slots.
@@ -556,6 +582,12 @@ coi trust --list        # -> <fingerprint>  /abs/path/.coi/config.toml
 Re-approval is required only when a mount's host/container/`readonly` changes (fingerprint-pinned),
 not when unrelated settings change. `COI_TRUST_ALL=1` bypasses the gate — CI/automation only.
 
+**Mounts gone after upgrading coi.** Approvals don't carry across versions: verified 0.9.0 → 0.15.0,
+where a 0.9-trusted config — still listed by `coi trust --list` — launched with
+`WARNING: ignoring untrusted mount`. Re-run `coi trust` in each project and recreate its container
+(`make coi-recreate`); mounts only attach at creation. A Makefile that captures coi's output (like
+`coi-create`) must print these warnings, or the container just comes up without its mounts.
+
 ### 10.4 Clean up and verify
 Remove the half-booted containers from the failed attempts, then verify without a full session:
 
@@ -595,3 +627,29 @@ grep -n 'coi-hosts' /etc/hosts
 
 `make coi-hosts` needs sudo, so run it from a real terminal (in Claude Code: `! make coi-hosts`).
 
+---
+
+## 12. "Unable to read managed policy settings" (coi 0.9.0)
+
+### 12.1 Symptom
+Claude inside the sandbox stops at:
+
+```
+Unable to read managed policy settings.
+This machine may require organization login enforcement, but the policy file failed to load.
+Detail: /etc/claude-code/managed-settings.json: … EACCES: permission denied
+```
+
+`/login` gets past it for that session; the next session hits it again.
+
+### 12.2 Cause
+coi 0.9.0 writes `/etc/claude-code/managed-settings.json` (`{"disableAutoMode": "disable"}`) at every
+session start by pushing a host temp file, which carries mode `0600`. Depending on how its owner maps
+in, it lands `code`-owned (readable — most containers) or `root:root 0600` (unreadable to `code`).
+Claude treats an unreadable policy file as possible org-login enforcement.
+
+### 12.3 Fix
+Upgrade coi (≥ 0.11 writes it `root:root 0644` from inside the container) — SKILL.md §3.12.
+Stopgap: `incus exec <ctr> -- chmod 644 /etc/claude-code/managed-settings.json` and restart Claude.
+A background post-start `chmod` is not reliable: coi rewrites the file about a second before it
+launches Claude, so the fix usually lands after Claude has already read it.

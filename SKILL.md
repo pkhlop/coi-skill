@@ -1,11 +1,11 @@
 ---
 name: coi
-description: Set up, onboard, or operate code-on-incus (COI) — an Incus-based sandbox for running Claude Code and similar coding agents with --dangerously-skip-permissions safely. Use when the user asks to add COI to a project, create `.coi/config.toml`, wire COI into a Makefile, run Claude in a sandbox, forward SSH agent into the container, debug COI SSH/Docker/clipboard integration, upgrade the COI image, or set up Incus for COI on a new host.
+description: Set up, onboard, or operate code-on-incus (COI) — an Incus-based sandbox for running Claude Code and similar coding agents with --dangerously-skip-permissions safely. Use when the user asks to add COI to a project, create `.coi/config.toml`, wire COI into a Makefile, run Claude in a sandbox, forward SSH agent into the container, debug COI SSH/Docker/clipboard/microphone integration, pass an NVIDIA GPU into the sandbox, upgrade the COI image or the coi binary, or set up Incus for COI on a new host.
 ---
 
 # COI — sandboxed Claude Code via Incus
 
-[code-on-incus](https://github.com/mensfeld/code-on-incus) (`coi`) runs AI coding agents inside Incus containers so they can work autonomously (`--dangerously-skip-permissions`) without putting the host at risk. The project files are bind-mounted, SSH access goes through an agent proxy (no private keys in the container), Docker-in-container works, and the network can be either open or restricted to an allowlist.
+[Coi / code-on-incus](https://github.com/coipond/coi) (`coi`; formerly `mensfeld/code-on-incus`) runs AI coding agents inside Incus containers so they can work autonomously (`--dangerously-skip-permissions`) without putting the host at risk. The project files are bind-mounted, SSH access goes through an agent proxy (no private keys in the container), Docker-in-container works, and the network can be either open or restricted to an allowlist.
 
 This skill covers three tasks:
 
@@ -15,7 +15,7 @@ This skill covers three tasks:
 
 Before acting on anything `sudo`-level or on a file outside the target project, confirm with the user.
 
-> ### ⚠ Version compatibility — verified against `coi 0.9.x`
+> ### ⚠ Version compatibility — verified against `coi 0.15.0`
 >
 > **COI makes breaking changes across versions**, and this skill's exact paths, flags, and config
 > keys track a specific one. Known examples between 0.7 and 0.9 alone: `[defaults] persistent` was
@@ -24,6 +24,18 @@ Before acting on anything `sudo`-level or on a file outside the target project, 
 > (`coi trust`, mount gating, security-downgrade gating); the per-session **`--network` flag was
 > removed**; SSH-agent forwarding became **fully native** (device + `SSH_AUTH_SOCK`, §3.3); and
 > `coi update` was added.
+>
+> **0.9 → 0.15 (verified on a live 0.15.0 upgrade):** see §3.12 for the upgrade procedure. The ones
+> that bite: `coi update` on ≤ 0.11.0 **wrongly reports "already on the latest version"** (manual
+> install); **trust approvals made by 0.9 are not honored** — every project needs `coi trust` again
+> or its mounts are silently dropped; root-level `model` moved to **`[tool.claude] model`** (0.11);
+> direct commits/pushes to **`main`/`master` are blocked by default** (0.14); `managed-settings.json`
+> is now written readable (0.9.0's unreadable copy caused an org-login prompt, §3.12); config-shaped
+> CLI flags (`--image`, `--persistent`, …) were removed (0.10); the project moved to `coipond/coi`.
+> Re-verified on 0.15.0: config discovery, `[[mounts.default]]`, trust gating, native SSH forwarding,
+> `[defaults.environment]`, open network from `~/.coi`, `coi list --format json` shape, and the
+> `--slot`/`--resume`/`--debug`/`-w` flags the Makefile uses. **Not** re-verified: restricted network
+> mode (§4) and the X11/Docker details beyond what §3.4 states.
 >
 > **The dangerous drift is the silent kind.** A removed key errors loudly and gets fixed. A key that
 > moved to a different *table* (`[environment]` → `[defaults.environment]`) parses fine and does
@@ -35,7 +47,7 @@ Before acting on anything `sudo`-level or on a file outside the target project, 
 > distro/package bump, or a fresh machine — treat this skill as *possibly stale* and re-verify before
 > relying on specifics:
 >
-> 1. `coi version` — note the number. If it's **newer than 0.9.x**, every exact path/flag/key below
+> 1. `coi version` — note the number. If it's **newer than 0.15.x**, every exact path/flag/key below
 >    is "needs re-verification"; prefer `coi --help`, `coi health`, and the upstream README.
 > 2. `coi health` — the fastest one-shot check; its `CONFIGURATION` (`Config loaded`, `Network mode`)
 >    and `NETWORKING` rows surface most breakage immediately.
@@ -56,7 +68,7 @@ Skip this section if `coi health` reports no `[FAIL]` entries in the CRITICAL bl
 
 ### 1.1 Requirements
 
-- Linux host (Ubuntu 24.04 tested; other distros should work if Incus ≥ 6.1 is available).
+- Linux host (Ubuntu 24.04 and 26.04 tested; other distros should work if Incus ≥ 6.1 is available).
 - **Incus ≥ 6.1.** Ubuntu noble's main/ESM repo ships 6.0, which is too old — install from [Zabbly's stable repo](https://github.com/zabbly/incus).
 - User in the `incus-admin` group (log out/in after adding).
 - An SSH agent running (any flavour — `ssh-agent`, `gnome-keyring`, `keychain`).
@@ -68,7 +80,7 @@ Skip this section if `coi health` reports no `[FAIL]` entries in the CRITICAL bl
 3. `sudo usermod -aG incus-admin $USER` → log out + back in.
 4. Install COI:
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/mensfeld/code-on-incus/master/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/coipond/coi/master/install.sh | bash
    ```
    (Review the installer before piping to bash; confirm with user.)
 5. `coi build` — 5–10 minutes, pulls Claude Code's native installer (`claude.ai/install.sh`) at build time. **Don't kill it early**; don't poll.
@@ -130,11 +142,13 @@ Verify discovery with `coi health` → `Config loaded: <path>` and `Network mode
 > | Setting | `<repo>/.coi/config.toml` **and** `~/.coi/config.toml` | profile file (`coi profile`, `--profile`) |
 > |---|---|---|
 > | Env vars | `[defaults.environment]` | `[environment]` |
-> | Extra mounts | `[[mounts.default]]` | `[[mounts]]` |
+> | Extra mounts | `[[mounts.default]]` (flat `[[mounts]]` also accepted since 0.12) | `[[mounts]]` |
 > | Persistence | `[container] persistent` | `[container] persistent` |
 >
 > A top-level `[environment]` in a project or user-global config **parses without error and is then
-> ignored**. Flat `[[mounts]]` there is a hard load error (`type mismatch for config.MountsConfig`).
+> ignored**. Flat `[[mounts]]` there was a hard load error up to 0.11 (`type mismatch for
+> config.MountsConfig`); 0.12 made mount blocks read the same in config and profiles. Keep
+> `[[mounts.default]]` in project configs anyway — it loads on every 0.9+ version.
 > **`coi schema profile` prints the PROFILE schema — do not validate `.coi/config.toml` against it.**
 > Verify a project config empirically instead (§2.7).
 
@@ -188,31 +202,34 @@ Copy, adjust, explain each line to the user before writing to `<project>/.coi/co
 
 - **The two `~/.claude` mounts are load-bearing — keep them.** `coi profile info default` lists the same two paths under the built-in profile's `[[mounts]]`, which makes declaring them here look redundant. It isn't: verified on 0.9.0, a project whose config declares no mounts gets **no mount device at all** (launch logs only `Device workspace` + the `protect-*` set) and `/home/code/.claude/{projects,skills}` are empty container-local directories. Declared and trusted, they attach as `mount-0` / `mount-1` with real host content. Don't drop them on the strength of the profile listing.
 - **Verify mounts by device, not from inside.** `Device mount-N added to <container>` in the launch output and `incus config device show <container>` are authoritative. Probing with `mountpoint` inside the container can report a path as mounted when no device backs it — that false signal is exactly what makes the previous bullet tempting to get wrong.
-- Mounts are **only applied on container creation.** With `[container] persistent = true` and an existing container, editing `[[mounts.default]]` has no effect until `make coi-clean` destroys it and `make coi` recreates it. coi logs `"Reusing existing workspace and mount configurations"` on the reuse path.
+- Mounts are **only applied on container creation.** With `[container] persistent = true` and an existing container, editing `[[mounts.default]]` has no effect until the container is recreated (`make coi-recreate`, or `make coi-clean` then `make coi`). coi logs `"Reusing existing workspace and mount configurations"` on the reuse path.
 - Fields per entry: `host` (supports `~` expansion), `container` (must be absolute), `readonly` (bool, optional).
 - To hot-attach a mount to an already-running container without destroying it: `incus config device add <container> <name> disk source=<host> path=<container> shift=true` — `shift=true` is critical or the files show as `nobody:nogroup`.
-- **Out-of-workspace mounts are trust-gated (0.9)** — including both `~/.claude` entries above. They are dropped with a `WARNING: ignoring untrusted mount` until approved with `coi trust` in the repo dir, which makes `coi trust` a **required** onboarding step. See §2.4.
+- **Out-of-workspace mounts are trust-gated (0.9)** — including both `~/.claude` entries above. They are dropped with a `WARNING: ignoring untrusted mount` until approved with `coi trust` in the repo dir, which makes `coi trust` a **required** onboarding step. **Approvals do not survive a coi upgrade** (verified 0.9 → 0.15: every previously trusted project silently lost its mounts) — re-run `coi trust` per project after upgrading. See §2.4 and §3.12.
 - Never mount `~/.ssh` or `$HOME`. See §5.
 
 ### 2.2 Wire Makefile targets
 
 Copy the snippet from `references/Makefile.snippet` into the project's Makefile under a dedicated `# ── Sandboxed Claude (COI) ─` section. It provides:
 
-- `make coi` — launches Claude in a sandbox. (The SSH-agent proxy is coi's job, not the Makefile's — see §3.3.)
+- `make coi` — launches Claude in a sandbox, always in slot `$(COI_SLOT)` (default 1, see below). If the project has no container yet it runs `coi-create` first. (The SSH-agent proxy is coi's job, not the Makefile's — see §3.3.)
+- `make coi-create` — create the container with all host integrations: creates slot `$(COI_SLOT)` **stopped** via `coi run -- true`, attaches the GPU before first boot (`coi-gpu`, only when `COI_GPU` is set — auto-on if the host has `nvidia-container-cli`), boots it once to run `coi-x11` and `coi-ssh-fix`, then stops it so the next `make coi` starts it through coi. A failing integration prints a `WARNING` and creation continues. It also surfaces coi's own `WARNING` lines, which the captured output would otherwise hide — notably `ignoring untrusted mount` (→ `coi trust`, then `coi-recreate`).
+- `make coi-recreate` — delete this project's container(s) (any status), then `coi-create`. The way to apply mount/config changes to a persistent container.
+- `make coi-gpu` — attach the host NVIDIA GPU (§3.11). Restarts the container if it is running.
 - `make coi-resume` — resume the last session.
 - `make coi-debug` — bash shell, no Claude (for diagnosing the container itself). Starts a **new** `coi shell --debug` session.
 - `make coi-bash` — interactive bash **inside the container that is already running**, via `incus exec … runuser -u code`. Use this to inspect or work alongside a live sandbox; `coi-debug` can't, because it launches a separate session.
 - `make coi-bash-claude` — Claude in the already-running container **without tmux**, so scrollback is your terminal's native buffer instead of tmux copy-mode. Extra flags via `ARGS=…`.
 - `make coi-containers` — list only this project's containers (workspace-scoped).
-- `make coi-ssh-fix` — **repair only.** Idempotent re-attach of the SSH-agent proxy device *at coi's own path*, for when the host agent was restarted mid-session. It is not part of startup. See §3.3.
+- `make coi-ssh-fix` — idempotent re-attach of the SSH-agent proxy device *at coi's own path*, for when the host agent was restarted mid-session. Run once by `coi-create`, never on every launch — coi re-points the device itself at session start (it keeps an unchanged device, otherwise removes and re-adds it). See §3.3.
 - `make coi-docker-fix` — fix `/var/run/docker.sock` perms inside the container.
 - `make coi-git-fix` — bind-mount the main worktree's `.git/` into the container so `git` resolves worktree paths. No-op in the main worktree; idempotent re-attach in a child worktree. See §3.10.
 - `make coi-hosts` — write the running container's IP into `/etc/hosts` for `*.<project>.test`-style local domains (adapt `COI_LOCAL_DOMAIN` per project). Slug-aware (see §3.10): tags each line with a `# coi-hosts:<project>:<slug>` sentinel so multiple worktrees — and multiple projects — coexist safely.
 - `make coi-hosts-clean` — remove only this worktree's `/etc/hosts` lines (matched by sentinel tag). Idempotent; safe to run when nothing is registered.
-- `make coi-x11` — attach X11 clipboard + PulseAudio (microphone) to the running container. Enables Ctrl+V image paste and `/voice` dictation. **Run before `make coi`**, or restart Claude after.
+- `make coi-x11` — attach X11 clipboard + PulseAudio (microphone) to the running container. Enables Ctrl+V image paste and `/voice` dictation. Run automatically by `coi-create`; by hand, **run before `make coi`**, or restart Claude after.
 - `make coi-extras` — install **generic, project-agnostic** terminal/navigation tools (mc, htop, rsync, pv, bash-completion, aria2, unzip, fzf-make) + apply the IPv4 gai.conf fix for the Incus bridge. Language runtimes (PHP, Node, Go, Python, Ruby) and project-scope tools (Playwright, AWS CLI, DB clients) are **not** installed here — they live in project-owned targets (see §2.3).
 - `make coi-self-bootstrap` — **the one target that runs INSIDE the container, not on the host.** Re-applies fixes that don't survive `coi build` / container recreation: currently the Playwright headless-shell wrapper (see §3.9). Idempotent — invoked from `/workspace` inside a coi shell. Every other target on this list runs on the host; this one is the exception.
-- `make coi-clean` — stop & delete **only this project's** COI container(s); never touches other projects.
+- `make coi-clean` — stop & delete **only this project's** COI container(s), running or stopped; never touches other projects.
 - `make coi-update` — `coi build` with a clear message, for cadence-based image refreshes. After this completes, run `make coi-self-bootstrap` from inside the new container (see §3.9).
 
 The snippet is parameterised via `$(USER)` and has no project-specific names baked in. Two vars worth explaining: `COI_SSH_SOCK` (host agent path, defaults to `/tmp/ssh-agent-$(USER).sock`, used only as a precondition check and by the repair target) and `COI_SSH_SOCK_CONTAINER` (`/tmp/ssh-agent.sock` — **coi's** path, not one the Makefile chooses). Bind mounts are not defined in the Makefile — they live in `[[mounts.default]]` in `.coi/config.toml` (see §2.1). Never add `~/.ssh` or `$HOME` to either the mounts or the Makefile.
@@ -226,7 +243,11 @@ COI_THIS_JQ := (.active_containers // [])[] | select(.workspace==$$ws and .statu
 coi-this-container = coi list --format json 2>/dev/null | jq -r --arg ws '$(CURDIR)' '$(COI_THIS_JQ)'
 ```
 
-Every recipe that targets a container calls `$(coi-this-container)` — it returns only containers whose COI workspace equals `$(CURDIR)`. Requires `jq` on the host. When adding new container-targeting recipes, **never `grep '^coi-'` alone** — always go through the workspace filter. `coi-clean` also intentionally skips the global `coi clean` command, because that sweeps orphaned firewall rules across *all* projects.
+Every recipe that targets a container calls `$(coi-this-container)` — it returns only **running** containers whose COI workspace equals `$(CURDIR)`. Recipes that create, delete or configure a possibly-stopped container (`coi-create`, `coi-recreate`, `coi-clean`, `coi-gpu`) use the sibling `$(coi-any-container)`, same filter without the status check. Requires `jq` on the host. When adding new container-targeting recipes, **never `grep '^coi-'` alone** — always go through the workspace filter. `coi-clean` also intentionally skips the global `coi clean` command, because that sweeps orphaned firewall rules across *all* projects.
+
+**Slot pinning (`COI_SLOT ?= 1`).** coi's slot auto-allocation treats a *stopped* persistent container as occupied: a plain `coi shell` / `coi run` next to a stopped slot 1 creates a fresh slot 2 without the GPU and integrations `coi-create` attached (observed with `coi run` on 0.9.0; not re-tested on 0.15 — keep the pin). So the launch targets pass `--slot $(COI_SLOT)`. For a parallel session use `make coi COI_SLOT=2` — that slot gets no `coi-create` setup.
+
+**`make -n` is not a safe dry run for these targets.** GNU make executes any recipe line containing `$(MAKE)` even under `-n`. A line that combined `incus start …; $(MAKE) coi-x11; incus stop …` really started and stopped the container during a dry run. The snippet keeps every `$(MAKE)` call on a recipe line of its own; preserve that when editing `coi-create` / `coi-recreate` / `_coi-ensure`.
 
 ### 2.3 Project-specific toolchains
 
@@ -248,7 +269,7 @@ If the project declares a lower bound (e.g. `"php": ">=8.2"`), prefer the **newe
 
 **Install patterns — reference recipes, apply only what the project needs:**
 
-- **PHP** — Ubuntu 22.04 (jammy, the COI base) ships PHP 8.1; use `ondrej/php` for newer:
+- **PHP** — Ubuntu 24.04 (noble, the COI base image) ships PHP 8.3; use `ondrej/php` for other versions:
   ```bash
   add-apt-repository -y ppa:ondrej/php
   apt-get update -qq
@@ -309,7 +330,12 @@ mount your home directory or open the network on you. Two classes of setting are
    Approval is **pinned to a fingerprint of the approved mounts** — changing a mount's host path,
    container path, or `readonly` flag requires re-approval; changing unrelated settings (base image,
    network mode) does not. In-workspace mounts, and mounts from the trusted `~/.coi/config.toml` /
-   `$COI_CONFIG`, are never gated.
+   `$COI_CONFIG`, are never gated. On 0.15 the approval also covers forwarded sockets, credential
+   entries and published ports.
+   - **Approvals don't carry across coi upgrades.** Verified 0.9.0 → 0.15.0: a config trusted by
+     0.9 (still listed by `coi trust --list` with the same fingerprint) launches on 0.15 with
+     `WARNING: ignoring untrusted mount`. After upgrading coi, re-run `coi trust` in **every**
+     project, then recreate its container — mounts only attach at creation.
    - **Onboarding consequence:** the standard `~/.claude/projects` + `~/.claude/skills` mounts are
      out-of-workspace, so the **first `make coi` boots without them until `coi trust`**. The full
      onboarding sequence is: write config → `coi trust` → `make coi`. Don't try to dodge this by
@@ -317,7 +343,9 @@ mount your home directory or open the network on you. Two classes of setting are
 
 2. **Security-downgrading settings.** `[network] mode = "open"` in the *project* file is ignored
    with `WARNING: ignoring security-downgrading "network.mode=open" …`; it only applies from the
-   trusted `~/.coi/config.toml` or a `$COI_CONFIG`-referenced file (see §4).
+   trusted `~/.coi/config.toml` or a `$COI_CONFIG`-referenced file (see §4). Since 0.11 **every**
+   protection-weakening field is trusted-scope only — e.g. `[git] protected_branches` (§5) can't be
+   shrunk or emptied from a project file; coi falls back to the default instead.
 
 **`COI_TRUST_ALL=1`** bypasses the mount gate — **CI/automation only**, never interactive on a host
 where you clone untrusted repos. A `$COI_CONFIG` file is trusted, so don't point `$COI_CONFIG` at an
@@ -345,10 +373,14 @@ host sessions and host-UI cruft (figma/voice/tui) doesn't leak into the sandbox.
 Key gotchas: `ultracode` is a real settings.json **boolean** (persistable, not
 CLI-only); `effortLevel` enum tops out at `xhigh`; and **coi has no classifier
 "auto" permission mode** (only `bypass`/`interactive` — `bypass` is the right
-choice inside the sandbox). **Model selection is the least settled part** — the
-built-in profile pins `claude-sonnet-4-5`, yet a live 0.9.0 container's `claude`
-process carries no `--model` flag and no model env var, so verify before relying
-on either channel. Full recipe, verified key/flag/env names, and the
+choice inside the sandbox). **Model:** since 0.11 the key is **`[tool.claude] model`**
+in `~/.coi/config.toml`, delivered as `ANTHROPIC_MODEL` to the Claude that `coi shell`
+launches (not to `coi run` commands). A root-level `model` — where 0.9 docs put it,
+and where it never reached the CLI — is silently ignored. Confirmed in the 0.15.0
+source; check `echo $ANTHROPIC_MODEL` in a live `make coi` session. **Attribution:**
+0.15 writes `{"includeCoAuthoredBy": false}` into the root-owned
+`/etc/claude-code/managed-settings.json` and installs a commit-message strip hook, so
+sandbox commits carry no Claude co-author line by default. Full recipe, verified key/flag/env names, and the
 rollout/verification steps are in `references/claude-settings.md`.
 
 ### 2.7 Verifying a config actually applied
@@ -368,7 +400,10 @@ wrong table (§2.1). Two cleanup notes: `coi run` inherits `[container]
 persistent`, so it leaves a **stopped** container behind — delete it by name
 (`incus delete <name> --force`), never with a global `coi clean`, which sweeps
 other projects' orphans. And `coi run` needs `--` before the command, otherwise
-flags like `bash -c` are parsed by coi itself.
+flags like `bash -c` are parsed by coi itself. The scratch dir is a different
+workspace, so its copied config is **untrusted** until you run `coi trust` there too
+(`coi untrust` afterwards) — otherwise every out-of-workspace mount is dropped and the
+check proves nothing about mounts.
 
 ---
 
@@ -377,18 +412,20 @@ flags like `bash -c` are parsed by coi itself.
 ### 3.1 Start / stop / resume
 
 ```bash
-make coi                  # start fresh sandboxed Claude session
+make coi                  # start a sandboxed Claude session (creates the container first if none)
 make coi-resume           # resume the most recent session (--resume=auto)
+make coi-recreate         # fresh container: GPU + X11/mic + SSH agent attached before first use
 # Detach without killing:  Ctrl+B d  (tmux detach)
 # Reattach:                make coi  (or coi shell) from same project
 ```
 
 ### 3.2 Parallel sessions
 
-COI supports multiple slots per workspace. Launch a second one explicitly:
+COI supports multiple slots per workspace. The Makefile pins its own launches to `COI_SLOT` (default 1, §2.2); launch a second one explicitly:
 
 ```bash
-coi shell --slot 2        # second parallel sandbox for this project
+make coi COI_SLOT=2       # second parallel sandbox (no coi-create setup)
+coi shell --slot 2        # same, without the Makefile
 coi list                  # show active containers
 ```
 
@@ -417,17 +454,19 @@ If `ssh-add -l` does fail inside the container, work through:
 1. **Host:** `ssh-add -l` — the agent must be live and hold keys. Restarting it on the host orphans the container-side proxy.
 2. **Host:** `incus config device show <container> | grep -A6 '^ssh-agent:'` — confirm `listen: unix:/tmp/ssh-agent.sock`. A different `listen` path means something re-created the device; find and remove that code.
 3. **Container:** `echo $SSH_AUTH_SOCK` — should be `/tmp/ssh-agent.sock`. Empty means coi's env injection didn't happen (usually `forward_agent` missing/false, or the whole config failed to load — check `coi health` → `Config loaded`).
-4. **Host:** `make coi-ssh-fix` — re-attaches the device at coi's path. Repair only; it is not part of startup.
+4. **Host:** `make coi-ssh-fix` — re-attaches the device at coi's path. Run once by `coi-create`; otherwise repair only, never on every launch.
 
 ### 3.4 X11 clipboard, image paste & microphone (optional)
 
-`make coi-x11` attaches the host's X11 display, clipboard, and PulseAudio socket to the running container. After running it, Claude Code's Ctrl+V image paste and `/voice` dictation work natively inside the sandbox.
+`make coi-x11` attaches the host's X11 display, clipboard, and PulseAudio socket to the running container. After running it, Claude Code's Ctrl+V image paste and `/voice` dictation work natively inside the sandbox. `make coi-create` runs it automatically for a new container (a failure warns and creation continues).
+
+Verified on an Ubuntu 26.04 KDE **Wayland** host (X0 served by Xwayland, audio by PipeWire's pulse server): text both ways, `image/png` host → container, mic capture. The host needs nothing beyond the desktop defaults (`xhost`, `xauth`, the `X0` and `pulse/native` sockets).
 
 What it does:
-1. Mounts `/tmp/.X11-unix/X0` (X11 socket) into the container.
+1. Attaches `/tmp/.X11-unix/X0` as an Incus **`proxy`** device (`bind=container uid=1000 gid=1000 mode=0600`) — **not** a disk mount. A disk-mounted X0 shows up as `nobody:nogroup 0775` inside, so `code` has no write permission on the socket and every client fails with `Can't open display: :0`. The proxy connects host-side as root, which step 7's grant admits.
 2. Copies the host's `$XAUTHORITY` file into `/home/code/.Xauthority` with correct ownership (disk-mount causes `nobody:nogroup` — use `incus file push --uid 1000 --gid 1000` instead).
 3. Mounts the PulseAudio socket (`/run/user/<uid>/pulse/native`) for microphone access.
-4. Installs `xclip` + `pulseaudio-utils` + `libasound2-plugins` inside the container.
+4. Runs `apt-get update` then installs `xclip` + `pulseaudio-utils` + `libasound2-plugins` inside the container, failing loudly. A fresh container has **empty apt lists**; the old recipe skipped the update and sent output to `/dev/null`, so the install failed silently and left sockets attached but no tools. Using the host's binaries instead isn't viable — `pactl` alone pulls ~24 host libraries, and the ALSA plugin must match the container's libasound.
 5. Writes `/etc/asound.conf` to route ALSA through PulseAudio (Claude Code's audio uses ALSA, which fails without a sound card unless routed through PulseAudio).
 6. Writes `/etc/profile.d/x11-audio.sh` (sets `DISPLAY`, `XAUTHORITY`, `PULSE_SERVER`) and sources it from `/etc/bash.bashrc` for non-login shells.
 7. Runs `xhost +si:localuser:root` on the host to allow container X connections.
@@ -486,13 +525,13 @@ Claude Code is baked into the `coi-default` image at `coi build` time via `claud
 - **Ephemeral containers** (default): `make coi-update` rebuilds the image — next `coi shell` gets the new Claude. 5–10 min.
 - **Persistent slots** (`[container] persistent = true`): run `claude update` inside the container; the upgrade sticks because the container state survives.
 - **Don't** `npm install -g @anthropic-ai/claude-code@latest` inside the container — installs a parallel copy that fights the native install on `$PATH`.
-- **The `coi` binary itself:** `coi update` (0.9) updates coi and its threat-detection databases — distinct from `coi build`, which rebuilds the container *image*. Re-running the upstream install script also upgrades the binary.
+- **The `coi` binary itself:** `coi update` updates coi and its threat-detection databases (`coi update core` / `coi update patterns` for one of them) — distinct from `coi build`, which rebuilds the container *image*. **On ≤ 0.11.0 `coi update` is broken** (it parses its own version as `vv0.9.0` and reports "already on the latest version") — upgrade manually, §3.12.
 
 Rebuild cadence: weekly is a reasonable default; more often if Claude ships a feature you need.
 
 ### 3.8 Bridging host services into the container
 
-Some services can't run in COI — GPU-dependent workloads (PyTorch/CUDA inference), memory-heavy data engines, anything relying on host-only hardware. The pattern: **run the service on the host, bridge its port into the container via an Incus `proxy` device.**
+Some services can't run in COI — memory-heavy data engines, anything relying on host-only hardware, or GPU workloads you'd rather keep on the host than pass the GPU through (§3.11). The pattern: **run the service on the host, bridge its port into the container via an Incus `proxy` device.**
 
 Topology:
 - Host service listens on `127.0.0.1:<PORT>` (loopback only — the proxy is the only path in).
@@ -538,7 +577,7 @@ coi-nlp-proxy: ## (Re)attach host nlp-service (:8000) proxy to this project's CO
 
 Use the workspace-scoped `$(coi-this-container)` helper from §2.2 so a mis-timed invocation can't attach a device to another project's container.
 
-This complements §6's "GPU access" limitation — the container still has no GPU, but it has a stable path to a host service that does.
+This is the alternative to GPU passthrough (§3.11) — the container gets no GPU, but a stable path to a host service that has one.
 
 ### 3.9 Self-bootstrap inside the container (per-rebuild fixes)
 
@@ -619,6 +658,46 @@ The `_coi-post-start` recipe applies this automatically when `make coi` runs fro
 
 Reference implementation: a worktree ADR in your own project (covers slug derivation rules, the `.env` rewrites, the `setup-state` symlink, and the `worktree-add` / `worktree-remove` flow end-to-end).
 
+### 3.11 GPU passthrough (NVIDIA)
+
+coi has no GPU config key (checked through 0.15.0), so the GPU is attached with plain Incus config on the container. Verified with a GTX 1080 Ti, driver 580, on an Ubuntu 26.04 host and the 24.04 coi image:
+
+```bash
+incus config set <container> nvidia.runtime=true            # injects the host driver userspace (nvidia-smi, libcuda)
+incus config device add <container> gpu gpu gputype=physical
+incus restart <container>                                   # nvidia.runtime only applies at start
+```
+
+- **Host requirement:** `nvidia-container-cli` (libnvidia-container) — that is what `nvidia.runtime` calls. No driver install inside the container; the host's driver version shows up in `nvidia-smi` there.
+- **`make coi-gpu`** does this idempotently on a running *or stopped* container and restarts it only if running (which ends the Claude session in it). `make coi-create` applies it while the container is still stopped, before first boot — so the normal path never restarts anything. The snippet's `COI_GPU` defaults to on exactly when the host has `nvidia-container-cli`; force with `COI_GPU=1`, disable with `COI_GPU=`.
+- **Survives coi's reuse path.** Both the `gpu` device and `nvidia.runtime` persisted across coi stopping/restarting a persistent container (0.9.0 and 0.15.0). They do **not** survive deletion — that's why creation goes through `coi-create`, and why the launch slot is pinned (§2.2): an auto-allocated slot 2 has no GPU.
+- **Shared, not exclusive.** The card's memory is shared with whatever the host already runs on it.
+- **Tradeoff:** the container gets direct access to the GPU driver (a larger kernel/driver attack surface than the proxy approach of §3.8). Fine for your own code; prefer §3.8 for untrusted workloads.
+
+### 3.12 Upgrading the `coi` binary (0.9 → 0.15 runbook)
+
+Done for real on 2026-10-19. In order:
+
+1. **Read the upstream CHANGELOG** for every version you skip — `[Breaking]` entries are explicit there.
+2. **Install.** On ≤ 0.11.0, `coi update` is broken (`vv0.9.0` self-version → "already on the latest version"), so install the release by hand. The project moved to **`coipond/coi`** (old links redirect):
+   ```bash
+   cd "$(mktemp -d)"
+   curl -fsSLO https://github.com/coipond/coi/releases/download/vX.Y.Z/coi-linux-amd64
+   curl -fsSLO https://github.com/coipond/coi/releases/download/vX.Y.Z/checksums.txt
+   grep ' coi-linux-amd64$' checksums.txt | sha256sum -c -
+   sudo cp /usr/local/bin/coi /usr/local/bin/coi-OLD.bak     # keep a rollback
+   sudo install -m 755 coi-linux-amd64 /usr/local/bin/coi
+   sudo setcap cap_linux_immutable=ep /usr/local/bin/coi     # replacing the file drops this capability
+   ```
+   Without the `setcap`, `coi health` warns `Immutable cap` and launches print *"Protected paths rely on read-only bind mounts only (bypassable with root in container)"*.
+3. **Migrate config keys** (they fail silently): root-level `model` → `[tool.claude] model` (0.11); check for removed flags in Makefiles (`--image`, `--persistent`, `--tmux`, `--tool` → config, 0.10).
+4. **Re-trust every project** — `coi trust` in each repo listed by `coi trust --list`. 0.9 approvals are not honored (§2.4).
+5. **`coi update patterns`**, then `coi health` in a project dir (`Config loaded`, `Network mode`).
+6. **`coi build --force`** and recreate containers (`make coi-recreate`) — image-level changes (e.g. 0.15's masked guest AppArmor, cloud-init disabled in the image) only reach containers built from the new image, and mounts only re-attach at creation.
+7. **Verify in a fresh container** (§2.7) — device list (`mount-N`, `gpu`, `x11-socket`, `pulse-audio`, `ssh-agent`), then GPU, mounts, clipboard, mic, `ssh-add -l`.
+
+**0.9.0 bug this fixes — "Unable to read managed policy settings".** 0.9.0 writes `/etc/claude-code/managed-settings.json` by pushing a 0600 host temp file at every session start. When it lands `root:root 0600`, Claude (running as `code`) gets `EACCES`, treats the unreadable policy as possible org-login enforcement, and demands `/login`. A post-start `chmod 644` loses the race against Claude's startup. 0.11+ writes it `root:root 0644` in-container — upgrading is the only clean fix.
+
 ---
 
 ## 4. Firewall modes
@@ -662,14 +741,16 @@ These MUST hold. If a setup step would violate one, refuse and surface the confl
 4. **Do not commit `.coi/config.toml` to a public repo without reviewing `[defaults.environment]`** — it's a common place to accidentally paste secrets.
 5. **Ephemeral by default, persistent by choice.** Long-running persistent slots accumulate state (shell history, downloaded tools) that an attacker could probe. Prefer ephemeral unless the upgrade/time cost is meaningful.
 6. **Keep `coi` and the image current.** `coi update` refreshes the binary + threat databases; `coi build` rebuilds the image. Weekly is reasonable — old base images accumulate CVEs.
-7. **Don't remove or override the `protect-git-config` / `protect-git-hooks` devices.** COI adds these read-only bind mounts over `/workspace/.git/config` and `/workspace/.git/hooks/` automatically — visible in `incus config device show <container>`. They block the classic git-hook escape vector: an agent writes `[core] hooksPath = /tmp/evil` into `.git/config` or drops a `post-commit` into `.git/hooks/`, and the next `git commit` **you** run on the host executes attacker-controlled code under your host identity, with your SSH agent and your shell. The mounts make those writes fail with `EROFS` while leaving the rest of `.git/` (refs, objects, index) writable so normal git operations inside the container still work. If you see a failing `git config --local` or a hook-install step that errors, that's the protection doing its job — don't "fix" it by removing the device. The full 0.9.0 set is wider than the two devices in this heading — a launch logs `Protected paths (mounted read-only): .git/hooks, .git/config, .git/config.worktree, .git/info/attributes, .husky, .vscode, .coi`. 0.9 also applies **host-side immutable protection** (`chattr +i`, visible via `lsattr -d`) to the protected dirs **while a session/container is running**, so a host-side edit of `.coi/config.toml` mid-session can fail with `EPERM`. Same protection, not a bug — edit config when no session is running, or use the trusted `~/.coi/config.toml`.
+7. **Don't remove or override the `protect-git-config` / `protect-git-hooks` devices.** COI adds these read-only bind mounts over `/workspace/.git/config` and `/workspace/.git/hooks/` automatically — visible in `incus config device show <container>`. They block the classic git-hook escape vector: an agent writes `[core] hooksPath = /tmp/evil` into `.git/config` or drops a `post-commit` into `.git/hooks/`, and the next `git commit` **you** run on the host executes attacker-controlled code under your host identity, with your SSH agent and your shell. The mounts make those writes fail with `EROFS` while leaving the rest of `.git/` (refs, objects, index) writable so normal git operations inside the container still work. If you see a failing `git config --local` or a hook-install step that errors, that's the protection doing its job — don't "fix" it by removing the device. The full 0.9.0 set is wider than the two devices in this heading — a launch logs `Protected paths (mounted read-only): .git/hooks, .git/config, .git/config.worktree, .git/info/attributes, .husky, .vscode, .coi`; on 0.15 the list also includes `.claude/settings.json`, `.claude/settings.local.json` and `.codex/config.toml` (all workspace-relative — `/home/code/.claude/settings.json`, where `_coi-post-start` pushes settings, is not affected). 0.9 also applies **host-side immutable protection** (`chattr +i`, visible via `lsattr -d`) to the protected dirs **while a session/container is running**, so a host-side edit of `.coi/config.toml` mid-session can fail with `EPERM`. Same protection, not a bug — edit config when no session is running, or use the trusted `~/.coi/config.toml`.
 8. **Don't blanket-set `COI_TRUST_ALL=1`.** It bypasses the 0.9 mount-trust gate that stops a cloned repo from mounting your home dir or opening the network. Approve per-project with `coi trust` on a host; reserve `COI_TRUST_ALL=1` for CI. (§2.4)
+9. **Keep the protected-branch guard (0.14+).** coi installs root-owned pre-commit/pre-push hooks refusing commits on, and pushes to, `main`/`master` — the agent works on a feature branch (`git switch -c <branch>`) and opens a PR. Configure it only in the trusted `~/.coi/config.toml` (`[git] protected_branches`: absent → main+master, a list → that set, `[]` → off); a project file can't weaken it. It's client-side — `--no-verify` or a repo-local `core.hooksPath` (husky) bypasses it — so server-side branch protection stays the real backstop.
+10. **Keep `cap_linux_immutable` on the coi binary.** It enables the host-side `chattr +i` protection of §5.7; reinstalling the binary drops it (§3.12).
 
 ---
 
 ## 6. When *not* to use COI
 
-- Tasks that need GPU access *inside* the container. (GPU-dependent services can still run on the host and be bridged in via an Incus proxy device — see §3.8.)
+- Tasks that need a GPU **and** run untrusted code — passthrough (§3.11) exposes the host driver; bridge a host service in instead (§3.8). Hosts without NVIDIA's container CLI can't pass a GPU through at all.
 - Tasks where the agent must write outside the mounted workspace (it can't by design).
 - Projects where the 5–10 minute `coi build` cost dominates a 30-second task.
 - CI/CD — COI is a local sandbox. Use proper CI infrastructure for automated pipelines.
@@ -682,4 +763,4 @@ These MUST hold. If a setup step would violate one, refuse and surface the confl
 - `references/Makefile.snippet` — drop-in Makefile section.
 - `references/claude-settings.md` — make every container start Claude with chosen defaults (effort, `ultracode`, model, attribution) via `~/.coi` env + a dedicated `coi-settings.json` push (§2.6).
 - `references/troubleshooting.md` — install-time pitfalls, SSH/Docker/clipboard debugging, IPv6/apt slowness fix (§6), performance baseline, Incus reset procedure.
-- Upstream: https://github.com/mensfeld/code-on-incus (README is authoritative; if this skill contradicts it, trust the README and flag the drift).
+- Upstream: https://github.com/coipond/coi (formerly `mensfeld/code-on-incus`; README and CHANGELOG are authoritative — if this skill contradicts them, trust upstream and flag the drift).

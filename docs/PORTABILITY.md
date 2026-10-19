@@ -63,10 +63,10 @@ deploy story:
   the trusted `~/.coi/config.toml` (or a `$COI_CONFIG` file) — set it once per host if you run in
   open mode. Restricted mode instead needs passwordless sudo for `/usr/sbin/nft` (once per host).
 - **Mounts need `coi trust` once per project** (the `~/.claude/*` mounts resolve outside the
-  workspace). It's fingerprint-pinned, so re-run only when those mounts change.
+  workspace). It's fingerprint-pinned, so re-run when those mounts change — and after every `coi` upgrade (0.9 approvals are not honored by 0.15).
 
 Both are covered in `docs/HOST_SETUP.md` and `references/troubleshooting.md §10`, and the version
-sensitivity is why `SKILL.md` opens with a "verified against coi 0.9.x" compatibility callout.
+sensitivity is why `SKILL.md` opens with a "verified against coi 0.15.0" compatibility callout.
 
 ### Project-owned, deliberately *not* in the skill
 

@@ -14,13 +14,17 @@
 #   this file (.coi/config.toml)     |  profile file (`coi profile` / --profile)
 #   ---------------------------------|-----------------------------------------
 #   [defaults.environment]           |  [environment]
-#   [[mounts.default]]               |  [[mounts]]
+#   [[mounts.default]]  (*)          |  [[mounts]]
 #   [container] persistent           |  [container] persistent
 #
 # `coi schema profile` prints the PROFILE schema — do NOT validate this file
 # against it. Verify this file empirically instead (see "Verifying" at the end).
 #
-# Verified against coi 0.9.0. Re-verify after a coi upgrade.
+# (*) since 0.12 the flat [[mounts]] form is accepted here too; keep
+#     [[mounts.default]] — it loads on every version from 0.9 on.
+#
+# Verified against coi 0.9.0; loads and applies unchanged on 0.15.0. Re-verify
+# after a coi upgrade — and re-run `coi trust`: approvals don't survive one.
 
 [tool]
 # Which coding agent to launch. "claude" (default), "opencode", "aider".
@@ -111,8 +115,9 @@ enabled = true
 #  - Applied at container CREATION only. With [container] persistent = true,
 #    edits here do nothing until `make coi-clean` destroys the container.
 #  - Fields: host (supports `~`), container (absolute), readonly (optional).
-#  - Flat [[mounts]] is a PROFILE-only form; in this file it is a hard load
-#    error ("type mismatch for config.MountsConfig: expected table").
+#  - Flat [[mounts]] was a PROFILE-only form up to 0.11 — a hard load error
+#    here ("type mismatch for config.MountsConfig: expected table"); 0.12+
+#    accepts it. [[mounts.default]] works on all versions.
 #  - Both entries resolve OUTSIDE /workspace, so 0.9 gates them: they are
 #    dropped with a WARNING until `coi trust` is run once in the repo dir.
 #    That makes `coi trust` a required onboarding step, not an optional one —
